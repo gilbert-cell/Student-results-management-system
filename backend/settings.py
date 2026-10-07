@@ -12,9 +12,11 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 from pathlib import Path
 import os
+from urllib.parse import parse_qs, unquote, urlparse
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_BUILD_DIR = BASE_DIR / 'frontend' / 'build'
 
 try:
     from dotenv import load_dotenv
@@ -79,12 +81,15 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+if not DEBUG:
+    MIDDLEWARE.insert(2, 'whitenoise.middleware.WhiteNoiseMiddleware')
+
 ROOT_URLCONF = 'backend.urls'
 
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [FRONTEND_BUILD_DIR],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -104,17 +109,37 @@ WSGI_APPLICATION = 'backend.wsgi.application'
 
 DATABASE_ENGINE = os.environ.get('DB_ENGINE', 'sqlite').lower()
 if DATABASE_ENGINE in {'postgres', 'postgresql'}:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.environ.get('DB_NAME', 'srms'),
-            'USER': os.environ.get('DB_USER', 'srms'),
-            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
-            'HOST': os.environ.get('DB_HOST', 'localhost'),
-            'PORT': os.environ.get('DB_PORT', '5432'),
-            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+    database_url = os.environ.get('DATABASE_URL', '')
+    if database_url:
+        parsed_database_url = urlparse(database_url)
+        database_options = {
+            key: values[-1]
+            for key, values in parse_qs(parsed_database_url.query).items()
         }
-    }
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': unquote(parsed_database_url.path.lstrip('/')),
+                'USER': unquote(parsed_database_url.username or ''),
+                'PASSWORD': unquote(parsed_database_url.password or ''),
+                'HOST': parsed_database_url.hostname or '',
+                'PORT': str(parsed_database_url.port or ''),
+                'OPTIONS': database_options,
+                'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+            }
+        }
+    else:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': os.environ.get('DB_NAME', 'srms'),
+                'USER': os.environ.get('DB_USER', 'srms'),
+                'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+                'HOST': os.environ.get('DB_HOST', 'localhost'),
+                'PORT': os.environ.get('DB_PORT', '5432'),
+                'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+            }
+        }
 else:
     DATABASES = {
         'default': {
@@ -128,6 +153,7 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_REFERRER_POLICY = 'same-origin'
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     if os.environ.get('DJANGO_SECURE_SSL_REDIRECT', '').lower() in {'1', 'true', 'yes'}:
         SECURE_SSL_REDIRECT = True
     hsts_seconds = int(os.environ.get('DJANGO_SECURE_HSTS_SECONDS', '0'))
@@ -137,8 +163,9 @@ if not DEBUG:
         SECURE_HSTS_PRELOAD = os.environ.get('DJANGO_SECURE_HSTS_PRELOAD', '').lower() in {'1', 'true', 'yes'}
 
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SAMESITE = 'Lax'
+cross_site_cookies = os.environ.get('DJANGO_CROSS_SITE_COOKIES', '').lower() in {'1', 'true', 'yes'}
+SESSION_COOKIE_SAMESITE = 'None' if cross_site_cookies and not DEBUG else 'Lax'
+CSRF_COOKIE_SAMESITE = 'None' if cross_site_cookies and not DEBUG else 'Lax'
 
 
 # Password validation
@@ -199,7 +226,14 @@ LOGGING = {
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [FRONTEND_BUILD_DIR / 'static'] if (FRONTEND_BUILD_DIR / 'static').is_dir() else []
+if not DEBUG:
+    STORAGES = {
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+    }
 
 
 # Email

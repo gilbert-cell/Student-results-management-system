@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: srms-testing
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/auth/csrf/
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: srms-testing.onrender.com,localhost,127.0.0.1
+      - key: DB_ENGINE
+        value: postgresql
+      - key: DATABASE_URL
+        fromDatabase:
+          name: srms-testing-db
+          property: connectionString
+      - key: FRONTEND_URL
+        value: https://srms-testing.onrender.com
+      - key: SRMS_BOOTSTRAP_ADMIN_USERNAME
+        sync: false
+      - key: SRMS_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: SRMS_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+
+databases:
+  - name: srms-testing-db
+    databaseName: srms_testing
+    user: srms_testing
+    plan: free
+    region: singapore
