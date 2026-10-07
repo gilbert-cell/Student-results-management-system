@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim AS frontend-build
 
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 COPY frontend/ ./
 ENV REACT_APP_API_URL=/api
 RUN npm run build
