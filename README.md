@@ -29,6 +29,14 @@ The API is the authorization boundary. The frontend hides navigation that does n
 
 Set `DB_ENGINE=postgresql` and configure `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` in `.env`. The SQLite configuration remains useful for local development; production secrets and allowed hosts are read from environment variables. Set `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=false`, `DJANGO_ALLOWED_HOSTS`, and `CORS_ALLOWED_ORIGINS` for deployment.
 
+## Deploy a shared test environment on Render
+
+The repository includes a `render.yaml` Blueprint for one Django web service and a shared Render PostgreSQL database. The build bundles React into Django's static files, so the frontend and API use one public URL and session cookies work as same-origin cookies. Push the repository to GitHub, then in Render choose **New → Blueprint**, connect the repository, and apply the Blueprint.
+
+When Render creates the Blueprint, it asks for `SRMS_BOOTSTRAP_ADMIN_USERNAME`, `SRMS_BOOTSTRAP_ADMIN_EMAIL`, and `SRMS_BOOTSTRAP_ADMIN_PASSWORD`. Choose and save these credentials privately; the container creates that initial Super Admin after applying migrations. Sign in at the service URL, then create teacher, academic officer, administrator, and student accounts in **Users & Access**. There is no public self-registration; each person uses the account created for them and can sign in from their own device using the shared deployed URL. After the first successful deploy, you can remove the bootstrap password from the service's Environment settings; the existing admin account remains.
+
+The Blueprint uses `srms-testing.onrender.com`. If Render requires a different service name, update `FRONTEND_URL` and `DJANGO_ALLOWED_HOSTS` to match the actual URL, then redeploy. Free web services sleep after 15 minutes without traffic, and a free test database expires after 30 days, so expect a cold start and export test data before expiry or upgrade the database in Render.
+
 Enable `DJANGO_SECURE_SSL_REDIRECT=true` only after the site and reverse proxy are configured for HTTPS. Configure `DJANGO_SECURE_HSTS_SECONDS` only when the HTTPS deployment is stable; include subdomains or preload only if every affected host supports HTTPS. These options remain off by default to avoid breaking local HTTP development.
 
 ## API areas

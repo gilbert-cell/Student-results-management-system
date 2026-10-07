@@ -1,4 +1,4 @@
-import { FormEvent, ReactElement, useEffect, useMemo, useState } from 'react';
+﻿import { FormEvent, ReactElement, useEffect, useMemo, useState } from 'react';
 import './App.css';
 
 type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TEACHER' | 'STUDENT' | 'ACADEMIC_OFFICER';
@@ -245,11 +245,20 @@ async function readResponse<T>(response: Response): Promise<T> {
   return payload as T;
 }
 
+let csrfTokenFromApi = '';
+
+async function refreshCsrfToken(): Promise<string> {
+  const response = await fetch(`${apiRoot}/auth/csrf/`, { credentials: 'include' });
+  const payload = await readResponse<{ csrfToken: string }>(response);
+  csrfTokenFromApi = payload.csrfToken;
+  return csrfTokenFromApi;
+}
+
 function getCsrfToken(): string {
   const cookie = document.cookie
     .split('; ')
     .find((part) => part.startsWith('csrftoken='));
-  return cookie ? decodeURIComponent(cookie.split('=').slice(1).join('=')) : '';
+  return cookie ? decodeURIComponent(cookie.split('=').slice(1).join('=')) : csrfTokenFromApi;
 }
 
 async function readApi<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -278,6 +287,7 @@ function formatTermName(name: string): string {
 function App() {
   const [user, setUser] = useState<AuthenticatedUser | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [username, setUsername] = useState('');
@@ -423,6 +433,7 @@ function App() {
 
   useEffect(() => {
     let isMounted = true;
+    refreshCsrfToken().catch(() => undefined);
     fetch(`${apiRoot}/auth/me/`, { credentials: 'include', headers: { Accept: 'application/json' } })
       .then(async (response) => {
         if (response.status === 401) return null;
@@ -943,7 +954,7 @@ function App() {
     setForgotNotice('');
     setIsSendingReset(true);
     try {
-      await readResponse(await fetch(`${apiRoot}/auth/csrf/`, { credentials: 'include' }));
+      await refreshCsrfToken();
       const response = await fetch(`${apiRoot}/auth/forgot-password/`, {
         method: 'POST',
         credentials: 'include',
@@ -966,7 +977,7 @@ function App() {
     setResetNotice('');
     setIsResettingPassword(true);
     try {
-      await readResponse(await fetch(`${apiRoot}/auth/csrf/`, { credentials: 'include' }));
+      await refreshCsrfToken();
       const response = await fetch(`${apiRoot}/auth/reset-password/`, {
         method: 'POST',
         credentials: 'include',
@@ -990,7 +1001,7 @@ function App() {
     setAuthError('');
     setIsSubmitting(true);
     try {
-      await readResponse(await fetch(`${apiRoot}/auth/csrf/`, { credentials: 'include' }));
+      await refreshCsrfToken();
       const response = await fetch(`${apiRoot}/auth/login/`, {
         method: 'POST',
         credentials: 'include',
@@ -1002,6 +1013,7 @@ function App() {
         body: JSON.stringify({ username, password }),
       });
       const payload = await readResponse<{ user: AuthenticatedUser }>(response);
+      await refreshCsrfToken();
       setUser(payload.user);
       setPassword('');
       setSelectedStudent(null);
@@ -1018,6 +1030,7 @@ function App() {
     setAuthError('');
     setIsSigningOut(true);
     try {
+      await refreshCsrfToken();
       const response = await fetch(`${apiRoot}/auth/logout/`, {
         method: 'POST',
         credentials: 'include',
@@ -1041,7 +1054,7 @@ function App() {
     setPasswordChangeNotice('');
     setIsChangingPassword(true);
     try {
-      await readResponse(await fetch(`${apiRoot}/auth/csrf/`, { credentials: 'include' }));
+      await refreshCsrfToken();
       const response = await fetch(`${apiRoot}/auth/change-password/`, {
         method: 'POST',
         credentials: 'include',
@@ -1053,6 +1066,7 @@ function App() {
         body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
       });
       const payload = await readResponse<{ detail: string }>(response);
+      await refreshCsrfToken();
       setCurrentPassword('');
       setNewPassword('');
       setPasswordChangeNotice(payload.detail);
@@ -1773,6 +1787,7 @@ function App() {
   const isAdminWorkspace = ['SUPER_ADMIN', 'ADMIN'].includes(user.role);
   const adminStandaloneItems = ['Dashboard', 'Results', 'Reports', 'Users', 'Audit Logs'];
   const setNavigationSection = (item: string) => {
+    setIsSidebarOpen(false);
     if (studentWorkspaceItems.includes(item)) setStudentWorkspaceView(item);
     if (item === 'Submitted Results') { setTeacherResultsView(item); setResultStatusFilter('SUBMITTED'); }
     if (item === 'Enter Results') { setTeacherResultsView(item); setResultStatusFilter(''); }
@@ -1797,7 +1812,8 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className={`sidebar ${user.role === 'STUDENT' ? 'sidebar-student' : ''}`}>
+      {isSidebarOpen && <div className="sidebar-overlay" onClick={() => setIsSidebarOpen(false)} aria-hidden="true" />}
+      <aside className={`sidebar ${user.role === 'STUDENT' ? 'sidebar-student' : ''} ${isSidebarOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-block">
           <span className="brand-mark"><SchoolLogo /></span>
           <span><h1>SRMS</h1><p>Academic Portal</p><small>Student Results Management</small></span>
@@ -1845,10 +1861,15 @@ function App() {
 
       <main className="main-panel">
         <header className="topbar">
-          <div>
-            <span className="eyebrow">{roleLabel.toUpperCase()} WORKSPACE</span>
-            <h2>{activeSection === 'Dashboard' ? 'Student Results Management System' : activeSection === 'Profile' ? 'My Profile' : activeSection === 'Account Settings' ? 'Account Settings' : activeSection === 'Students' && user.role === 'STUDENT' ? studentWorkspaceView : activeSection === 'Students' ? 'Student directory' : activeSection === 'My Classes' ? 'My classes' : activeSection === 'My Subjects' ? 'My subjects' : activeSection === 'Teachers' ? 'Teacher directory' : activeSection === 'Classes' ? 'Class management' : activeSection === 'Subjects' ? 'Subject management' : activeSection === 'Users' ? 'User management' : activeSection === 'Audit Logs' ? 'Audit logs' : activeSection === 'Academic Years' ? 'Academic year settings' : activeSection === 'Terms' ? 'Term settings' : activeSection === 'Results' ? 'Results workflow' : `Welcome, ${user.name}`}</h2>
-            {activeSection === 'Dashboard' ? <p className="dashboard-context">{dashboard.academic_context.academic_year && dashboard.academic_context.term ? `${dashboard.academic_context.academic_year} · ${dashboard.academic_context.term}` : 'No active academic year and term'}</p> : null}
+          <div className="topbar-left">
+            <button type="button" className="hamburger-btn" onClick={() => setIsSidebarOpen((v) => !v)} aria-label="Toggle navigation" aria-expanded={isSidebarOpen}>
+              <span /><span /><span />
+            </button>
+            <div>
+              <span className="eyebrow">{roleLabel.toUpperCase()} WORKSPACE</span>
+              <h2>{activeSection === 'Dashboard' ? 'Student Results Management System' : activeSection === 'Profile' ? 'My Profile' : activeSection === 'Account Settings' ? 'Account Settings' : activeSection === 'Students' && user.role === 'STUDENT' ? studentWorkspaceView : activeSection === 'Students' ? 'Student directory' : activeSection === 'My Classes' ? 'My classes' : activeSection === 'My Subjects' ? 'My subjects' : activeSection === 'Teachers' ? 'Teacher directory' : activeSection === 'Classes' ? 'Class management' : activeSection === 'Subjects' ? 'Subject management' : activeSection === 'Users' ? 'User management' : activeSection === 'Audit Logs' ? 'Audit logs' : activeSection === 'Academic Years' ? 'Academic year settings' : activeSection === 'Terms' ? 'Term settings' : activeSection === 'Results' ? 'Results workflow' : `Welcome, ${user.name}`}</h2>
+              {activeSection === 'Dashboard' ? <p className="dashboard-context">{dashboard.academic_context.academic_year && dashboard.academic_context.term ? `${dashboard.academic_context.academic_year} \u00b7 ${dashboard.academic_context.term}` : 'No active academic year and term'}</p> : null}
+            </div>
           </div>
           <div className="topbar-account">
             <details className="profile-menu">
