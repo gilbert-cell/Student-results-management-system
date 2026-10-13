@@ -246,8 +246,8 @@ def terms(request):
                 return Response({'detail': 'Academic year ID must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
             terms_queryset = terms_queryset.filter(academic_year_id=int(year_id))
         return Response(TermSerializer(terms_queryset, many=True).data)
-    if request.user.role not in (User.Role.SUPER_ADMIN, User.Role.ADMIN, User.Role.ACADEMIC_OFFICER):
-        return Response({'detail': 'This role may view but not manage terms.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.user.role not in ADMIN_ROLES:
+        return Response({'detail': 'Only administrators may add terms.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = TermWriteSerializer(data=request.data)
     if serializer.is_valid():
         with transaction.atomic():
@@ -409,8 +409,8 @@ def school_classes(request):
             classes = classes.filter(Q(teacher__user=request.user) | Q(subjects__teacher__user=request.user)).distinct()
         return Response(SchoolClassSerializer(classes, many=True).data)
 
-    if request.user.role == User.Role.TEACHER:
-        return Response({'detail': 'Teachers may view only assigned classes.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.user.role not in ADMIN_ROLES:
+        return Response({'detail': 'Only administrators may add classes.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = SchoolClassWriteSerializer(data=request.data)
     if serializer.is_valid():
@@ -463,8 +463,8 @@ def subjects(request):
             subjects = subjects.filter(school_class__enrollments__student__user=request.user).distinct()
         return Response(SubjectSerializer(subjects, many=True).data)
 
-    if request.user.role == User.Role.TEACHER or request.user.role == User.Role.STUDENT:
-        return Response({'detail': 'This role may view subjects but may not manage them.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.user.role not in ADMIN_ROLES:
+        return Response({'detail': 'Only administrators may add subjects.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = SubjectWriteSerializer(data=request.data)
     if serializer.is_valid():
@@ -556,7 +556,7 @@ def bulk_create_results(request):
     academic_year = serializer.validated_data['academic_year']
     term = serializer.validated_data['term']
     assessment_type = serializer.validated_data['assessment_type']
-    submit = request.data.get('submit', False)
+    submit = serializer.validated_data['submit']
     next_status = Result.ResultStatus.SUBMITTED if submit else Result.ResultStatus.DRAFT
 
     if request.user.role == User.Role.TEACHER and (
@@ -586,7 +586,7 @@ def bulk_create_results(request):
                 result.marks = row['marks']
                 result.remarks = row['remarks']
                 result.status = next_status
-                result.save(update_fields=['marks', 'remarks', 'status', 'updated_at'])
+                result.save(update_fields=['marks', 'grade', 'remarks', 'status', 'updated_at'])
                 updated += 1
             else:
                 created += 1
@@ -710,25 +710,30 @@ def student_academic_report(request, student_id):
     ).filter(student=student, academic_year=academic_year, term=term).order_by('id'))
     if not enrollments:
         return Response({'detail': 'The student is not enrolled for this academic year and term.'}, status=status.HTTP_404_NOT_FOUND)
+
+    enrolled_classes = [e.school_class for e in enrollments]
+
+    if role == User.Role.TEACHER:
+        accessible = [
+            sc for sc in enrolled_classes
+            if (sc.teacher_id and sc.teacher.user_id == request.user.id)
+            or sc.subjects.filter(teacher__user=request.user).exists()
+        ]
+        if not accessible:
+            return Response({'detail': 'You may only view reports for your assigned classes.'}, status=status.HTTP_403_FORBIDDEN)
+        enrolled_classes = accessible
+
     published = Result.objects.filter(
         student=student,
-        subject__school_class__in=[enrollment.school_class for enrollment in enrollments],
+        subject__school_class__in=enrolled_classes,
         academic_year=academic_year,
         term=term,
         status=Result.ResultStatus.PUBLISHED,
     ).select_related('subject', 'approved_by').order_by('subject__name', 'assessment_type', 'id')
-    classes_with_results = set(published.values_list('subject__school_class_id', flat=True))
-    enrollment = next(
-        (row for row in enrollments if row.school_class_id in classes_with_results),
-        enrollments[0],
-    )
-    if role == User.Role.TEACHER and not (
-        enrollment.school_class.teacher_id
-        and enrollment.school_class.teacher.user_id == request.user.id
-    ) and not enrollment.school_class.subjects.filter(teacher__user=request.user).exists():
-        return Response({'detail': 'You may only view reports for your assigned classes.'}, status=status.HTTP_403_FORBIDDEN)
 
-    published = published.filter(subject__school_class=enrollment.school_class)
+    # Use the first enrollment for class-level metadata (teacher, class name)
+    enrollment = enrollments[0]
+
     grouped = {}
     for result in published:
         row = grouped.setdefault(result.subject_id, {
@@ -741,34 +746,76 @@ def student_academic_report(request, student_id):
             row['remarks'].append(result.remarks.strip())
 
     subjects = []
-    for row in grouped.values():
+    for subject_id, row in grouped.items():
         mark = round(sum(row['marks']) / len(row['marks']), 2)
         subjects.append({
+            'subject_id': subject_id,
             'subject': row['subject'],
             'marks': mark,
             'grade': Result.calculate_grade(mark),
             'remarks': '; '.join(row['remarks']) or 'No remarks',
         })
 
-    class_enrollments = Enrollment.objects.filter(
-        school_class=enrollment.school_class,
-        academic_year=enrollment.academic_year,
-        term=enrollment.term,
-    ).select_related('student__user')
-    class_size = class_enrollments.count()
+    # Build a subject_id -> school_class_id map from published results
+    subject_class_map = {r.subject_id: r.subject.school_class_id for r in published}
+
+    # Per-class cohort: students enrolled in each specific class
+    class_ids = list({e.school_class_id for e in enrollments})
+    # For each class, get the set of student PKs enrolled
+    class_student_ids = {}
+    for class_id in class_ids:
+        class_student_ids[class_id] = set(
+            Student.objects.filter(
+                enrollments__school_class_id=class_id,
+                enrollments__academic_year=academic_year,
+                enrollments__term=term,
+            ).distinct().values_list('pk', flat=True)
+        )
+
+    # class_size for the student's primary class (first enrollment)
+    primary_class_id = enrollments[0].school_class_id
+    class_size = len(class_student_ids.get(primary_class_id, set()))
+
+    # Per-subject cohort results scoped to the subject's own class
     cohort_subject_results = Result.objects.filter(
-        student__enrollments__in=class_enrollments,
-        subject__school_class=enrollment.school_class,
-        academic_year=enrollment.academic_year,
-        term=enrollment.term,
+        subject__school_class__in=enrolled_classes,
+        academic_year=academic_year,
+        term=term,
         status=Result.ResultStatus.PUBLISHED,
-    ).values('student_id', 'subject_id').annotate(average=Avg('marks'))
+    ).values('student_id', 'subject_id', 'subject__school_class_id').annotate(average=Avg('marks'))
+
+    # cohort_marks_by_subject: subject_id -> [(student_id, avg_mark)] for that subject's class only
+    cohort_marks_by_subject = {}
+    for cohort_row in cohort_subject_results:
+        subj_class_id = cohort_row['subject__school_class_id']
+        enrolled_in_class = class_student_ids.get(subj_class_id, set())
+        if cohort_row['student_id'] in enrolled_in_class:
+            cohort_marks_by_subject.setdefault(cohort_row['subject_id'], []).append(
+                (cohort_row['student_id'], float(cohort_row['average']))
+            )
+
+    for subject in subjects:
+        subject_id = subject.pop('subject_id')
+        cohort_marks = cohort_marks_by_subject.get(subject_id, [])
+        student_mark = next((mark for sid, mark in cohort_marks if sid == student.pk), None)
+        subj_class_id = subject_class_map.get(subject_id, primary_class_id)
+        subject['position'] = (
+            1 + sum(mark > student_mark for _, mark in cohort_marks)
+            if student_mark is not None else None
+        )
+        subject['class_size'] = len(class_student_ids.get(subj_class_id, set()))
+
     student_average = sum(row['marks'] for row in subjects) / len(subjects) if subjects else None
+
+    # Overall position: rank within the primary class
     position = None
     if student_average is not None:
+        primary_student_ids = class_student_ids.get(primary_class_id, set())
+        # Collect per-student averages for peers in the primary class
         cohort_averages = {}
-        for row in cohort_subject_results:
-            cohort_averages.setdefault(row['student_id'], []).append(float(row['average']))
+        for cohort_row in cohort_subject_results:
+            if cohort_row['student_id'] in primary_student_ids:
+                cohort_averages.setdefault(cohort_row['student_id'], []).append(float(cohort_row['average']))
         position = 1 + sum(
             sum(marks) / len(marks) > student_average
             for marks in cohort_averages.values()
@@ -776,32 +823,35 @@ def student_academic_report(request, student_id):
         )
 
     teacher = enrollment.school_class.teacher
-
-    # Approval and publication details
-    approvals = list(
-        published.exclude(approved_by__isnull=True)
-        .order_by('-updated_at')
-        .values('approved_by__first_name', 'approved_by__last_name', 'approved_by__username',
-                'approved_by__role', 'status', 'updated_at')
+    approval_entries = list(
+        ResultApproval.objects.filter(
+            result__in=published,
+            decision__in=(Result.ResultStatus.APPROVED, Result.ResultStatus.PUBLISHED),
+        ).select_related('approved_by').order_by('-created_at')
     )
-    approved_entry = next((a for a in approvals if a['status'] == Result.ResultStatus.APPROVED), None)
-    published_entry = next((a for a in approvals if a['status'] == Result.ResultStatus.PUBLISHED), None)
+    approved_entry = next(
+        (entry for entry in approval_entries if entry.decision == Result.ResultStatus.APPROVED), None,
+    )
+    published_entry = next(
+        (entry for entry in approval_entries if entry.decision == Result.ResultStatus.PUBLISHED), None,
+    )
 
     def _name(entry):
-        if not entry:
+        if not entry or not entry.approved_by:
             return ''
-        full = f"{entry.get('approved_by__first_name', '')} {entry.get('approved_by__last_name', '')}".strip()
-        return full or entry.get('approved_by__username', '')
+        return entry.approved_by.get_full_name() or entry.approved_by.username
 
     overall_grade = Result.calculate_grade(student_average) if student_average is not None else None
-    grade_status_map = {'A': 'Excellent', 'B': 'Very Good', 'C': 'Good', 'D': 'Pass', 'F': 'Fail'}
+    grade_status_map = {
+        'A': 'Excellent', 'B': 'Very Good', 'C': 'Good', 'D': 'Pass', 'E': 'Needs Improvement', 'F': 'Fail',
+    }
 
     return Response({
         'school_name': getattr(settings, 'SCHOOL_NAME', ''),
         'student': {
             'name': student.user.get_full_name() or student.user.username,
             'admission_number': student.admission_number,
-            'class_name': str(enrollment.school_class),
+            'class_name': ', '.join(str(e.school_class) for e in enrollments),
         },
         'academic_year': enrollment.academic_year.name,
         'term': enrollment.term.name,
@@ -814,9 +864,9 @@ def student_academic_report(request, student_id):
         'class_teacher': (teacher.user.get_full_name() or teacher.user.username) if teacher else '',
         'academic_officer': _name(approved_entry),
         'approved_by': _name(approved_entry),
-        'approved_at': approved_entry['updated_at'].isoformat() if approved_entry else None,
+        'approved_at': approved_entry.created_at.isoformat() if approved_entry else None,
         'published_by': _name(published_entry),
-        'published_at': published_entry['updated_at'].isoformat() if published_entry else None,
+        'published_at': published_entry.created_at.isoformat() if published_entry else None,
     })
 
 
@@ -1208,7 +1258,7 @@ def performance_summary(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminOrAcademicOfficer])
+@permission_classes([IsAdmin])
 def audit_logs(request):
     logs = AuditLog.objects.select_related('actor').order_by('-created_at')
     action = request.query_params.get('action', '').strip()

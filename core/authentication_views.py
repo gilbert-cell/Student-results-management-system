@@ -1,12 +1,10 @@
 import json
-import secrets
-from datetime import timedelta
 from json import JSONDecodeError
 
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
 from django.conf import settings
@@ -14,10 +12,11 @@ from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .models import User
 
-PASSWORD_RESET_TIMEOUT = 3600  # 1 hour
 _SAFE_RESPONSE = {'detail': 'If that email address is registered, a reset link has been sent.'}
 
 
@@ -78,17 +77,21 @@ def forgot_password(request):
         payload = json.loads(request.body)
     except (JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({'detail': 'Invalid request.'}, status=400)
-    email = payload.get('email', '').strip().lower()
+    if not isinstance(payload, dict):
+        return JsonResponse({'detail': 'Invalid request.'}, status=400)
+    email = payload.get('email', '')
+    if not isinstance(email, str):
+        return JsonResponse({'detail': 'Email address is required.'}, status=400)
+    email = email.strip().lower()
     if not email:
         return JsonResponse({'detail': 'Email address is required.'}, status=400)
 
-    try:
-        user = User.objects.get(email__iexact=email, is_active=True)
-    except User.DoesNotExist:
+    user = User.objects.filter(email__iexact=email, is_active=True).order_by('pk').first()
+    if user is None:
         return JsonResponse(_SAFE_RESPONSE)
 
-    token = secrets.token_urlsafe(32)
-    cache.set(f'pwd_reset_{token}', user.pk, PASSWORD_RESET_TIMEOUT)
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = f'{uid}-{default_token_generator.make_token(user)}'
 
     frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
     reset_link = f'{frontend_url}?reset_token={token}'
@@ -117,18 +120,23 @@ def reset_password(request):
         payload = json.loads(request.body)
     except (JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({'detail': 'Invalid request.'}, status=400)
-    token = payload.get('token', '').strip()
+    if not isinstance(payload, dict):
+        return JsonResponse({'detail': 'Invalid request.'}, status=400)
+    token = payload.get('token', '')
     new_password = payload.get('new_password', '')
+    if not isinstance(token, str) or not isinstance(new_password, str):
+        return JsonResponse({'detail': 'Token and new password are required.'}, status=400)
+    token = token.strip()
     if not token or not new_password:
         return JsonResponse({'detail': 'Token and new password are required.'}, status=400)
 
-    user_pk = cache.get(f'pwd_reset_{token}')
-    if not user_pk:
-        return JsonResponse({'detail': 'This reset link is invalid or has expired.'}, status=400)
-
     try:
+        uid, reset_token = token.split('-', 1)
+        user_pk = force_str(urlsafe_base64_decode(uid))
         user = User.objects.get(pk=user_pk, is_active=True)
-    except User.DoesNotExist:
+    except (ValueError, TypeError, User.DoesNotExist):
+        return JsonResponse({'detail': 'This reset link is invalid or has expired.'}, status=400)
+    if not default_token_generator.check_token(user, reset_token):
         return JsonResponse({'detail': 'This reset link is invalid or has expired.'}, status=400)
 
     try:
@@ -138,7 +146,6 @@ def reset_password(request):
 
     user.set_password(new_password)
     user.save(update_fields=['password'])
-    cache.delete(f'pwd_reset_{token}')
     return JsonResponse({'detail': 'Your password has been reset. You can now sign in.'})
 
 

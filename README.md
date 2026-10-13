@@ -1,6 +1,6 @@
 # Student Results Management System
 
-Django REST Framework API with a React dashboard. The backend enforces role and ownership checks, enrolment validation, marks validation, and the draft → submitted → under review → approved/rejected → published workflow. Workflow decisions are recorded in approval and audit records.
+Django REST Framework API with a React dashboard. The backend enforces role and ownership checks, enrolment validation, marks validation, and the draft → submitted → under review → approved/returned → published workflow. Workflow decisions are recorded in approval and audit records.
 
 ## Architecture
 
@@ -75,7 +75,7 @@ The current system represents Head of School access through the combined `ACADEM
 | Create/view academic years | Yes | Yes | View | Read all | Read all |
 | Create/view terms | Yes | Yes | Yes | Read all | Read all |
 | Create/view enrolments | Yes | Yes | Yes | Assigned view | Own enrolments |
-| Enter or edit marks | Full | Full | Full | Assigned subjects (draft/rejected) | No |
+| Enter or edit marks | Full | Full | Full | Assigned subjects (draft/returned) | No |
 | Review and approve results | Full | Full | Full | No | No |
 | Publish approved results | Full | Full | Full | No | No |
 | Read results | All | All | All | Assigned subjects and class-teacher classes | Own published only |
@@ -96,7 +96,7 @@ The dashboard's active-term average is currently the arithmetic mean of publishe
 ```text
 DRAFT -> SUBMITTED -> UNDER_REVIEW
 UNDER_REVIEW -> APPROVED -> PUBLISHED
-UNDER_REVIEW -> REJECTED -> DRAFT
+UNDER_REVIEW -> RETURNED -> DRAFT
 ```
 
 Teachers enter marks for assigned subjects. An administrator or academic officer reviews them; the person who entered a result cannot review that same result. Students can read their own results only after publication. Approval decisions are retained in result approval history and the audit log.

@@ -77,7 +77,7 @@ const emptyDataManagementForm: DataManagementForm = {
 
 type ResultRecord = {
   id: number;
-  marks: number;
+  marks: number | string;
   grade: string;
   status: string;
   assessment_type?: string;
@@ -96,7 +96,7 @@ type StudentAcademicReport = {
   student: { name: string; admission_number: string; class_name: string };
   academic_year: string;
   term: string;
-  subjects: { subject: string; marks: number; grade: string; remarks: string }[];
+  subjects: { subject: string; marks: number; grade: string; remarks: string; position: number | null; class_size: number }[];
   average: number | null;
   overall_grade: string | null;
   overall_status: string;
@@ -138,13 +138,36 @@ type DashboardData = {
   };
   school_name: string;
   academic_context: { academic_year: string | null; term: string | null };
-  result_status: { draft: number; submitted: number; under_review: number; approved: number; rejected: number; published: number };
+  result_status: { draft: number; submitted: number; under_review: number; approved: number; returned: number; published: number };
   notifications: DashboardNotification[];
   recent_results: ResultRecord[];
   top_students: StudentSummary[];
 };
 
 const apiRoot = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+
+// ── Client-side validation helpers ──
+function required(value: string, label: string): string {
+  return value.trim() ? '' : `${label} is required.`;
+}
+function minLen(value: string, len: number, label: string): string {
+  return value.length >= len ? '' : `${label} must be at least ${len} characters.`;
+}
+function validEmail(value: string): string {
+  if (!value.trim()) return '';
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()) ? '' : 'Enter a valid email address.';
+}
+function validPhone(value: string): string {
+  if (!value.trim()) return '';
+  return /^[\d\s()\-+]{7,20}$/.test(value.trim()) ? '' : 'Enter a valid phone number.';
+}
+function dateOrder(start: string, end: string): string {
+  if (!start || !end) return '';
+  return start < end ? '' : 'End date must be after the start date.';
+}
+function firstError(...checks: string[]): string {
+  return checks.find(Boolean) ?? '';
+}
 
 function getSafeErrorMessage(error: Error): string {
   return error.name === 'TypeError'
@@ -203,7 +226,7 @@ const roleAccess: Record<Role, string[]> = {
   ADMIN: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Academic Years', 'Terms', 'Results', 'Reports', 'Users', 'Audit Logs'],
   TEACHER: ['Dashboard', 'Students', 'My Classes', 'My Subjects', 'Enter Results', 'Submitted Results', 'Reports'],
   STUDENT: ['Dashboard', 'My Profile', 'My Results', 'My Performance', 'Result Slip'],
-  ACADEMIC_OFFICER: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Terms', 'Results', 'Reports', 'Audit Logs'],
+  ACADEMIC_OFFICER: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Terms', 'Results', 'Reports'],
 };
 const studentWorkspaceItems = ['My Profile', 'My Results', 'My Performance', 'Result Slip'];
 
@@ -211,7 +234,7 @@ const emptyDashboard: DashboardData = {
   stats: { students: 0, teachers: 0, classes: 0, subjects: 0, approved_results: 0, pending_results: 0, published_results: 0, average_performance: null },
   school_name: '',
   academic_context: { academic_year: null, term: null },
-  result_status: { draft: 0, submitted: 0, under_review: 0, approved: 0, rejected: 0, published: 0 },
+  result_status: { draft: 0, submitted: 0, under_review: 0, approved: 0, returned: 0, published: 0 },
   notifications: [],
   recent_results: [],
   top_students: [],
@@ -284,10 +307,18 @@ function formatTermName(name: string): string {
     .trim();
 }
 
+function formatOrdinal(value: number): string {
+  const suffix = value % 100 >= 11 && value % 100 <= 13
+    ? 'th'
+    : value % 10 === 1 ? 'st' : value % 10 === 2 ? 'nd' : value % 10 === 3 ? 'rd' : 'th';
+  return `${value}${suffix}`;
+}
+
 function App() {
   const [user, setUser] = useState<AuthenticatedUser | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [username, setUsername] = useState('');
@@ -457,6 +488,8 @@ function App() {
     if (!user) return;
 
     let isMounted = true;
+    setDashboard(emptyDashboard);
+    setIsNotificationsOpen(false);
     setIsLoadingDashboard(true);
     setDashboardError('');
     fetch(`${apiRoot}/dashboard/`, {
@@ -465,15 +498,19 @@ function App() {
     })
       .then((response) => readResponse<DashboardData>(response))
       .then((payload) => {
-        if (isMounted) setDashboard({
-          ...emptyDashboard,
-          ...payload,
-          academic_context: payload.academic_context ?? emptyDashboard.academic_context,
-          school_name: payload.school_name || '',
-          stats: { ...emptyDashboard.stats, ...payload.stats },
-          result_status: { ...emptyDashboard.result_status, ...payload.result_status },
-          notifications: payload.notifications ?? [],
-        });
+        if (isMounted) {
+          const nextDashboard = {
+            ...emptyDashboard,
+            ...payload,
+            academic_context: payload.academic_context ?? emptyDashboard.academic_context,
+            school_name: payload.school_name || '',
+            stats: { ...emptyDashboard.stats, ...payload.stats },
+            result_status: { ...emptyDashboard.result_status, ...payload.result_status },
+            notifications: payload.notifications ?? [],
+          };
+          setDashboard(nextDashboard);
+          if (nextDashboard.notifications.length > 0) setIsNotificationsOpen(true);
+        }
       })
       .catch((error: Error) => {
         if (isMounted) setDashboardError(getSafeErrorMessage(error));
@@ -912,7 +949,7 @@ function App() {
           { label: 'Reports', section: 'Reports' },
           { label: 'Users & access', section: 'Users' },
         ];
-  const resultStatusBars = ['draft', 'submitted', 'under_review', 'approved', 'rejected', 'published'].map((status) => ({
+  const resultStatusBars = ['draft', 'submitted', 'under_review', 'approved', 'returned', 'published'].map((status) => ({
     label: status.split('_').map((part) => part[0].toUpperCase() + part.slice(1)).join(' '),
     count: dashboard.result_status[status as keyof DashboardData['result_status']] || 0,
   }));
@@ -933,9 +970,11 @@ function App() {
   const studentSubjectPerformance = useMemo(() => {
     const grouped = new Map<string, { name: string; marks: number[] }>();
     publishedStudentResults.forEach((result) => {
+      const marks = Number(result.marks);
+      if (!Number.isFinite(marks)) return;
       const key = String(result.subject?.id ?? result.subject?.name ?? 'subject');
       const current = grouped.get(key) || { name: result.subject?.name || 'Subject', marks: [] };
-      current.marks.push(result.marks);
+      current.marks.push(marks);
       grouped.set(key, current);
     });
     return Array.from(grouped.values()).map((subject) => ({
@@ -944,12 +983,17 @@ function App() {
       average: subject.marks.reduce((total, mark) => total + mark, 0) / subject.marks.length,
     })).sort((first, second) => second.average - first.average);
   }, [publishedStudentResults]);
-  const studentOverallAverage = publishedStudentResults.length
-    ? publishedStudentResults.reduce((total, result) => total + result.marks, 0) / publishedStudentResults.length
-    : 0;
+  const studentMarkValues = publishedStudentResults
+    .map((result) => Number(result.marks))
+    .filter(Number.isFinite);
+  const studentOverallAverage = studentMarkValues.length
+    ? studentMarkValues.reduce((total, marks) => total + marks, 0) / studentMarkValues.length
+    : null;
 
   async function handleForgotPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(required(forgotEmail, 'Email address'), validEmail(forgotEmail));
+    if (err) { setAuthError(err); return; }
     setAuthError('');
     setForgotNotice('');
     setIsSendingReset(true);
@@ -973,6 +1017,8 @@ function App() {
 
   async function handleResetPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(required(newResetPassword, 'New password'), minLen(newResetPassword, 8, 'New password'));
+    if (err) { setAuthError(err); return; }
     setAuthError('');
     setResetNotice('');
     setIsResettingPassword(true);
@@ -998,6 +1044,8 @@ function App() {
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(required(username, 'Username'), required(password, 'Password'));
+    if (err) { setAuthError(err); return; }
     setAuthError('');
     setIsSubmitting(true);
     try {
@@ -1050,6 +1098,12 @@ function App() {
 
   async function handleChangePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(
+      required(currentPassword, 'Current password'),
+      required(newPassword, 'New password'),
+      minLen(newPassword, 8, 'New password'),
+    );
+    if (err) { setPasswordChangeError(err); return; }
     setPasswordChangeError('');
     setPasswordChangeNotice('');
     setIsChangingPassword(true);
@@ -1112,6 +1166,15 @@ function App() {
   async function handleSaveUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!user) return;
+    const err = firstError(
+      required(userForm.username, 'Username'),
+      !editingUserId ? required(userForm.password, 'Password') : '',
+      !editingUserId ? minLen(userForm.password, 8, 'Password') : '',
+      editingUserId && userForm.password ? minLen(userForm.password, 8, 'New password') : '',
+      validEmail(userForm.email),
+      validPhone(userForm.phone_number),
+    );
+    if (err) { setUserManagementError(err); return; }
     setIsSavingUser(true);
     setUserManagementError('');
     setUserManagementNotice('');
@@ -1199,6 +1262,16 @@ function App() {
   }
 
   async function handleBulkSave(submit: boolean) {
+    const err = firstError(
+      required(bulkContext.academic_year_id, 'Academic year'),
+      required(bulkContext.term_id, 'Term'),
+      required(bulkContext.subject_id, 'Subject'),
+      required(bulkContext.assessment_type, 'Assessment type'),
+      !bulkRows.some((r) => r.marks.trim()) ? 'Enter marks for at least one student.' : '',
+    );
+    if (err) { setBulkError(err); return; }
+    const invalidRow = bulkRows.find((r) => r.marks.trim() && (Number(r.marks) < 0 || Number(r.marks) > 100));
+    if (invalidRow) { setBulkError(`Marks for ${invalidRow.name} must be between 0 and 100.`); return; }
     setBulkError('');
     setBulkNotice('');
     setIsSavingBulk(true);
@@ -1252,7 +1325,13 @@ function App() {
 
   async function handleBulkEnroll(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!bulkEnrollIds.size) { setBulkEnrollError('Select at least one student.'); return; }
+    const err = firstError(
+      !bulkEnrollIds.size ? 'Select at least one student.' : '',
+      required(bulkEnrollContext.academic_year_id, 'Academic year'),
+      required(bulkEnrollContext.school_class_id, 'Class'),
+      required(bulkEnrollContext.term_id, 'Term'),
+    );
+    if (err) { setBulkEnrollError(err); return; }
     setBulkEnrollError('');
     setBulkEnrollNotice('');
     setIsSavingBulkEnroll(true);
@@ -1296,6 +1375,8 @@ function App() {
 
   async function handleBulkImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = required(bulkImportCsv.trim(), 'CSV data');
+    if (err) { setBulkImportError(err); return; }
     setBulkImportError('');
     setBulkImportNotice('');
     setIsBulkImporting(true);
@@ -1324,6 +1405,16 @@ function App() {
   async function handleSaveResult(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!user) return;
+    const err = firstError(
+      !editingResultId ? required(resultForm.student_id, 'Student') : '',
+      !editingResultId ? required(resultForm.subject_id, 'Subject') : '',
+      !editingResultId ? required(resultForm.academic_year_id, 'Academic year') : '',
+      !editingResultId ? required(resultForm.term_id, 'Term') : '',
+      required(resultForm.marks, 'Marks'),
+      resultForm.marks !== '' && (Number(resultForm.marks) < 0 || Number(resultForm.marks) > 100)
+        ? 'Marks must be between 0 and 100.' : '',
+    );
+    if (err) { setResultError(err); return; }
     setIsSavingResult(true);
     setResultError('');
     setResultNotice('');
@@ -1404,6 +1495,13 @@ function App() {
 
   async function handleSaveAcademicYear(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(
+      required(academicYearForm.name, 'Academic year name'),
+      required(academicYearForm.start_date, 'Start date'),
+      required(academicYearForm.end_date, 'End date'),
+      dateOrder(academicYearForm.start_date, academicYearForm.end_date),
+    );
+    if (err) { setAcademicYearError(err); return; }
     setIsSavingAcademicYear(true);
     setAcademicYearError('');
     setAcademicYearNotice('');
@@ -1451,6 +1549,14 @@ function App() {
 
   async function handleSaveTerm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(
+      required(termForm.academic_year_id, 'Academic year'),
+      required(termForm.name, 'Term name'),
+      required(termForm.start_date, 'Start date'),
+      required(termForm.end_date, 'End date'),
+      dateOrder(termForm.start_date, termForm.end_date),
+    );
+    if (err) { setTermError(err); return; }
     setIsSavingTerm(true);
     setTermError('');
     setTermNotice('');
@@ -1532,6 +1638,43 @@ function App() {
 
   async function handleSaveDataManagementRecord(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    let err = '';
+    if (activeSection === 'Students') {
+      err = firstError(
+        required(dataManagementForm.first_name, 'First name'),
+        required(dataManagementForm.last_name, 'Last name'),
+        required(dataManagementForm.admission_number, 'Admission number'),
+        !editingDataRecordId ? required(dataManagementForm.username, 'Username') : '',
+        !editingDataRecordId ? required(dataManagementForm.password, 'Password') : '',
+        !editingDataRecordId ? minLen(dataManagementForm.password, 8, 'Password') : '',
+        validEmail(dataManagementForm.email),
+        validPhone(dataManagementForm.phone_number),
+      );
+    } else if (activeSection === 'Teachers') {
+      err = firstError(
+        required(dataManagementForm.first_name, 'First name'),
+        required(dataManagementForm.last_name, 'Last name'),
+        required(dataManagementForm.employee_id, 'Employee ID'),
+        !editingDataRecordId ? required(dataManagementForm.username, 'Username') : '',
+        !editingDataRecordId ? required(dataManagementForm.password, 'Password') : '',
+        !editingDataRecordId ? minLen(dataManagementForm.password, 8, 'Password') : '',
+        editingDataRecordId && dataManagementForm.password ? minLen(dataManagementForm.password, 8, 'New password') : '',
+        validEmail(dataManagementForm.email),
+        validPhone(dataManagementForm.phone_number),
+      );
+    } else if (activeSection === 'Classes') {
+      err = firstError(
+        required(dataManagementForm.name, 'Class name'),
+        required(dataManagementForm.academic_year_id, 'Academic year'),
+      );
+    } else {
+      err = firstError(
+        required(dataManagementForm.code, 'Subject code'),
+        required(dataManagementForm.name, 'Subject name'),
+        required(dataManagementForm.school_class_id, 'Class'),
+      );
+    }
+    if (err) { setDataManagementError(err); return; }
     setIsSavingDataManagement(true);
     setDataManagementError('');
     setDataManagementNotice('');
@@ -1582,6 +1725,13 @@ function App() {
 
   async function handleCreateEnrollment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const err = firstError(
+      required(enrollmentForm.student_id, 'Student'),
+      required(enrollmentForm.academic_year_id, 'Academic year'),
+      required(enrollmentForm.school_class_id, 'Class'),
+      required(enrollmentForm.term_id, 'Term'),
+    );
+    if (err) { setEnrollmentError(err); return; }
     setIsSavingEnrollment(true);
     setEnrollmentError('');
     try {
@@ -1652,7 +1802,7 @@ function App() {
               </ul>
             </div>
           </div>
-          <div className="intro-footer"><span className="secure-dot" /> Secure access · Protected school records</div>
+
           <div className="intro-orbit orbit-one" />
           <div className="intro-orbit orbit-two" />
         </section>
@@ -1872,6 +2022,38 @@ function App() {
             </div>
           </div>
           <div className="topbar-account">
+            <div className="notification-menu">
+              <button
+                type="button"
+                className={`notification-trigger ${isNotificationsOpen ? 'open' : ''}`}
+                onClick={() => setIsNotificationsOpen((open) => !open)}
+                aria-label={`Notifications, ${dashboard.notifications.reduce((total, item) => total + item.count, 0)} pending`}
+                aria-expanded={isNotificationsOpen}
+                aria-haspopup="dialog"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+                {dashboard.notifications.reduce((total, item) => total + item.count, 0) > 0 ? <span className="notification-trigger-count">{dashboard.notifications.reduce((total, item) => total + item.count, 0)}</span> : null}
+              </button>
+              {isNotificationsOpen ? (
+                <section className="notification-popover" role="dialog" aria-label="Notifications">
+                  <div className="notification-popover-heading"><div><span className="eyebrow">For your account</span><strong>Notifications</strong></div><button type="button" onClick={() => setIsNotificationsOpen(false)} aria-label="Close notifications">×</button></div>
+                  {dashboard.notifications.length ? <ul className="notification-list">
+                    {dashboard.notifications.map((notification) => (
+                      <li key={`${notification.title}-${notification.status_filter}`}>
+                        <span className="notification-badge">{notification.count}</span>
+                        <div><strong>{notification.title}</strong><p>{notification.message}</p></div>
+                        <button type="button" className="dashboard-panel-link" onClick={() => {
+                          setResultStatusFilter(notification.status_filter);
+                          if (user.role === 'TEACHER') setTeacherResultsView('');
+                          setNavigationSection(notification.section);
+                          setIsNotificationsOpen(false);
+                        }}>View <span aria-hidden="true">→</span></button>
+                      </li>
+                    ))}
+                  </ul> : <p className="notification-empty">You’re all caught up.</p>}
+                </section>
+              ) : null}
+            </div>
             <details className="profile-menu">
               <summary className="profile-menu-trigger" aria-label={`Open ${user.name}'s profile menu`}>
                 <span className="profile-avatar" aria-hidden="true">{user.name.trim().charAt(0).toUpperCase()}</span>
@@ -1937,12 +2119,12 @@ function App() {
           <section className="panel academic-year-panel">
             <div className="panel-header">
               <div><span className="eyebrow">School setup</span><h3>Terms</h3></div>
-              <button className="primary-btn" type="button" onClick={startCreateTerm}>Add term</button>
+              {isAdminWorkspace ? <button className="primary-btn" type="button" onClick={startCreateTerm}>Add term</button> : null}
             </div>
             <p className="empty-note academic-year-description">Set term dates within their academic year. Terms with existing records stay attached to their original year.</p>
             {termError ? <p className="dashboard-error" role="alert">{termError}</p> : null}
             {termNotice ? <p className="user-management-notice" role="status">{termNotice}</p> : null}
-            {showTermForm || (!managedTerms.length && !isLoadingTerms) ? (
+            {isAdminWorkspace && (showTermForm || (!managedTerms.length && !isLoadingTerms)) ? (
               <form className="academic-year-form" onSubmit={handleSaveTerm}>
                 <div className="user-form-heading"><span className="eyebrow">{editingTermId ? 'Update term' : 'New term'}</span><h3>{editingTermId ? 'Edit term dates' : 'Add term'}</h3></div>
                 <div className="academic-year-grid">
@@ -2027,10 +2209,10 @@ function App() {
           </section>
         ) : activeSection === 'Classes' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
-            <div className="panel-header"><div><span className="eyebrow">Academic structure</span><h3>Classes</h3></div>{['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? <button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add class</button> : null}</div>
+            <div className="panel-header"><div><span className="eyebrow">Academic structure</span><h3>Classes</h3></div>{isAdminWorkspace ? <button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add class</button> : null}</div>
             <p className="empty-note data-management-description">Set up classes by academic year and assign a class teacher.</p>
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
-            {showDataManagementForm ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update class' : 'New class'}</span><h3>{editingDataRecordId ? 'Edit class details' : 'Add class'}</h3></div><div className="academic-year-grid">
+            {showDataManagementForm && (isAdminWorkspace || editingDataRecordId !== null) ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update class' : 'New class'}</span><h3>{editingDataRecordId ? 'Edit class details' : 'Add class'}</h3></div><div className="academic-year-grid">
               <label className="form-field"><span>Class name</span><input required maxLength={80} value={dataManagementForm.name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, name: event.target.value })} placeholder="e.g. Form 1" /></label><label className="form-field"><span>Section</span><input maxLength={40} value={dataManagementForm.section} onChange={(event) => setDataManagementForm({ ...dataManagementForm, section: event.target.value })} placeholder="Optional" /></label>
               <label className="form-field"><span>Academic year</span><select required disabled={editingDataRecordId !== null} value={dataManagementForm.academic_year_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, academic_year_id: event.target.value })}><option value="">Select year</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label className="form-field"><span>Class teacher</span><select value={dataManagementForm.teacher_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, teacher_id: event.target.value })}><option value="">Unassigned</option>{managedTeachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name} ({teacher.employee_id})</option>)}</select></label>
               <label className="academic-year-active"><input type="checkbox" checked={dataManagementForm.is_active} onChange={(event) => setDataManagementForm({ ...dataManagementForm, is_active: event.target.checked })} /><span>Class is active</span></label>
@@ -2039,10 +2221,10 @@ function App() {
           </section>
         ) : activeSection === 'Subjects' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
-            <div className="panel-header"><div><span className="eyebrow">Curriculum</span><h3>Subjects</h3></div><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add subject</button></div>
+            <div className="panel-header"><div><span className="eyebrow">Curriculum</span><h3>Subjects</h3></div>{isAdminWorkspace ? <button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add subject</button> : null}</div>
             <p className="empty-note data-management-description">Attach subjects to a class and assign the teacher responsible for entering marks.</p>
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
-            {showDataManagementForm ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update subject' : 'New subject'}</span><h3>{editingDataRecordId ? 'Edit subject details' : 'Add subject'}</h3></div><div className="academic-year-grid">
+            {showDataManagementForm && (isAdminWorkspace || editingDataRecordId !== null) ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update subject' : 'New subject'}</span><h3>{editingDataRecordId ? 'Edit subject details' : 'Add subject'}</h3></div><div className="academic-year-grid">
               <label className="form-field"><span>Subject code</span><input required maxLength={20} value={dataManagementForm.code} onChange={(event) => setDataManagementForm({ ...dataManagementForm, code: event.target.value })} /></label><label className="form-field"><span>Subject name</span><input required maxLength={120} value={dataManagementForm.name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, name: event.target.value })} /></label>
               <label className="form-field"><span>Class</span><select required value={dataManagementForm.school_class_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, school_class_id: event.target.value })}><option value="">Select class</option>{managedClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''} · {schoolClass.academic_year.name}</option>)}</select></label><label className="form-field"><span>Assigned teacher</span><select value={dataManagementForm.teacher_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, teacher_id: event.target.value })}><option value="">Unassigned</option>{managedTeachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name} ({teacher.employee_id})</option>)}</select></label>
               <label className="form-field"><span>Description</span><textarea rows={2} value={dataManagementForm.description} onChange={(event) => setDataManagementForm({ ...dataManagementForm, description: event.target.value })} /></label>
@@ -2058,7 +2240,7 @@ function App() {
                 <option value="REVIEW_QUEUE">Review queue</option>
                 <option value="PENDING">Pending action</option>
                 <option value="APPROVED_PUBLISHED">Approved / published</option>
-                {['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'PUBLISHED'].map((status) => <option key={status} value={status}>{status.replace('_', ' ')}</option>)}
+                {['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'RETURNED', 'PUBLISHED'].map((status) => <option key={status} value={status}>{status.replace('_', ' ')}</option>)}
               </select></label>
             </div>
             <p className="empty-note result-workflow-help">Teachers save marks as drafts and submit them for review. An administrator or academic officer reviews, approves, and publishes results. Students only see published results.</p>
@@ -2319,12 +2501,12 @@ function App() {
               </tbody></table></div>
             </section>
           </div>
-        ) : activeSection === 'Audit Logs' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
+        ) : activeSection === 'Audit Logs' && ['SUPER_ADMIN', 'ADMIN'].includes(user.role) ? (
           <section className="panel user-management-panel audit-log-panel">
             <div className="panel-header"><div><span className="eyebrow">Security and accountability</span><h3>Recent activity</h3></div><span className="audit-log-count">{auditLogs.length} entr{auditLogs.length === 1 ? 'y' : 'ies'}</span></div>
             <p className="empty-note user-management-description">Review account, academic structure, and result workflow changes. The newest activity appears first.</p>
             <div className="audit-log-filters">
-              <label className="form-field"><span>Action</span><select value={auditActionFilter} onChange={(event) => setAuditActionFilter(event.target.value)}><option value="">All actions</option>{['CREATE', 'UPDATE', 'DISABLE', 'DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'PUBLISHED'].map((action) => <option key={action} value={action}>{action.replace('_', ' ')}</option>)}</select></label>
+              <label className="form-field"><span>Action</span><select value={auditActionFilter} onChange={(event) => setAuditActionFilter(event.target.value)}><option value="">All actions</option>{['CREATE', 'UPDATE', 'DISABLE', 'DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'RETURNED', 'PUBLISHED'].map((action) => <option key={action} value={action}>{action.replace('_', ' ')}</option>)}</select></label>
               <label className="form-field"><span>Record type</span><select value={auditModelFilter} onChange={(event) => setAuditModelFilter(event.target.value)}><option value="">All record types</option>{['User', 'Student', 'Teacher', 'SchoolClass', 'Subject', 'AcademicYear', 'Term', 'Enrollment', 'Result'].map((model) => <option key={model} value={model}>{model === 'SchoolClass' ? 'Class' : model}</option>)}</select></label>
               <label className="form-field"><span>Show latest</span><select value={auditLimit} onChange={(event) => setAuditLimit(event.target.value)}><option value="50">50 records</option><option value="100">100 records</option><option value="200">200 records</option></select></label>
             </div>
@@ -2413,7 +2595,7 @@ function App() {
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Results' ? (
                     <section className="student-workspace-card"><div className="panel-header result-slip-header"><div><span className="eyebrow">Published results</span><h3>My results</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label></div></div><div className="table-scroll">{studentResultsTable}</div></section>
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Performance' ? (
-                    <section className="student-workspace-card"><div className="panel-header"><div><span className="eyebrow">Published assessment results</span><h3>My performance</h3></div></div><div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label></div><section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong>{studentOverallAverage.toFixed(1)}%</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td>{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
+                    <section className="student-workspace-card"><div className="panel-header"><div><span className="eyebrow">Published assessment results</span><h3>My performance</h3></div></div><div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label></div><section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong>{studentOverallAverage === null ? '—' : `${studentOverallAverage.toFixed(1)}%`}</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td>{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
                   ) : (
                     <div className="student-result-slip-content">
                       <div className="panel-header result-slip-header report-controls"><div><span className="eyebrow">Published results</span><h3>Student academic report</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">Select year</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)} disabled={!studentResultYearFilter}><option value="">Select term</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label><button className="sign-in-btn print-btn" type="button" onClick={() => window.print()} disabled={!studentAcademicReport || isLoadingStudentReport}>Print / Save as PDF</button></div></div>
@@ -2421,17 +2603,22 @@ function App() {
                       {isLoadingStudentReport ? <p className="empty-note report-screen-message">Preparing academic report...</p> : null}
                       {!studentResultYearFilter || !studentResultTermFilter ? <p className="empty-note report-screen-message">Select an academic year and term to view the student report.</p> : null}
                       {studentAcademicReport ? <>
-                        <header className="academic-report-heading">{studentAcademicReport.school_name ? <span>{studentAcademicReport.school_name}</span> : null}<h2>Student Academic Report</h2><p>{studentAcademicReport.academic_year} | {formatTermName(studentAcademicReport.term)}</p></header>
+                        <header className="academic-report-heading">
+                          <div className="academic-report-brand">
+                            <span className="academic-report-logo" aria-hidden="true"><svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="29"/><path d="m32 15 14 8v17l-14 9-14-9V23l14-8Z"/><path d="m32 23 7 4v9l-7 5-7-5v-9l7-4Z"/><path d="M32 8v7m18 3 5-5M49 32h8M14 18l-5-5m7 19H8m10 16-5 5m37-5 5 5M32 49v7"/></svg></span>
+                            <span className="academic-report-brand-rule" aria-hidden="true" />
+                            <div><span className="academic-report-school">{studentAcademicReport.school_name || 'School'}</span><h2>Student Academic Report</h2><p>{studentAcademicReport.academic_year} · {formatTermName(studentAcademicReport.term)}</p></div>
+                          </div>
+                        </header>
                         <div className="academic-report-facts">
-                          <p><strong>Student</strong><span>{studentAcademicReport.student.name}</span></p>
-                          <p><strong>Student ID</strong><span>{studentAcademicReport.student.admission_number}</span></p>
-                          <p><strong>Class</strong><span>{studentAcademicReport.student.class_name}</span></p>
-                          <p><strong>Position</strong><span>{studentAcademicReport.position === null ? '—' : `${studentAcademicReport.position} / ${studentAcademicReport.class_size}`}</span></p>
-                          <p><strong>Academic year</strong><span>{studentAcademicReport.academic_year}</span></p>
-                          <p><strong>Term</strong><span>{formatTermName(studentAcademicReport.term)}</span></p>
+                          <p><span className="report-fact-icon" aria-hidden="true">♟</span><strong>Student Name</strong><b>{studentAcademicReport.student.name}</b></p>
+                          <p><span className="report-fact-icon" aria-hidden="true">▤</span><strong>Student ID</strong><b>{studentAcademicReport.student.admission_number}</b></p>
+                          <p><span className="report-fact-icon" aria-hidden="true">◆</span><strong>Class</strong><b>{studentAcademicReport.student.class_name}</b></p>
+                          <p><span className="report-fact-icon" aria-hidden="true">▦</span><strong>Academic Year</strong><b>{studentAcademicReport.academic_year} — {formatTermName(studentAcademicReport.term)}</b></p>
                         </div>
+                        <h3 className="academic-report-section-title"><span />Academic Performance<span /></h3>
                         <div className="table-scroll academic-report-table">
-                          <table><thead><tr><th>Subject</th><th>Marks (%)</th><th>Grade</th><th>Remarks</th></tr></thead>
+                          <table><thead><tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Remarks</th></tr></thead>
                             <tbody>
                               {studentAcademicReport.subjects.map((row) => <tr key={row.subject}><td>{row.subject}</td><td>{row.marks.toFixed(2).replace(/\.00$/, '')}</td><td><span className="grade-badge">{row.grade}</span></td><td>{row.remarks}</td></tr>)}
                               {!studentAcademicReport.subjects.length ? <tr><td colSpan={4} className="empty-table">No published results are available for this term.</td></tr> : null}
@@ -2439,19 +2626,20 @@ function App() {
                           </table>
                         </div>
                         <div className="academic-report-summary">
-                          <p><strong>Overall Average</strong><span>{studentAcademicReport.average === null ? '—' : `${studentAcademicReport.average}%`}</span></p>
-                          <p><strong>Overall Grade</strong><span>{studentAcademicReport.overall_grade || '—'}</span></p>
-                          <p><strong>Overall Status</strong><span className={`report-status-badge ${(studentAcademicReport.overall_status || '').toLowerCase()}`}>{studentAcademicReport.overall_status || '—'}</span></p>
+                          <div className="academic-report-score-summary">
+                            <p><strong>Overall Average</strong><span className="report-average">{studentAcademicReport.average === null ? '—' : `${studentAcademicReport.average}%`}</span></p>
+                            <p><strong>Grade</strong><span className="report-grade">{studentAcademicReport.overall_grade || '—'}</span></p>
+                            <p className="report-overall-status"><strong>Overall Status</strong><span className={`report-status-badge ${(studentAcademicReport.overall_status || '').toLowerCase()}`}>{studentAcademicReport.overall_status || '—'}</span></p>
+                          </div>
+                          <div className="academic-report-comment">
+                            <div><strong>Remarks / Comments</strong></div>
+                            <p>{studentAcademicReport.subjects.map((row) => row.remarks).filter((remark) => remark && remark !== 'No remarks').join(' ') || 'No teacher remarks have been recorded for this term.'}</p>
+                          </div>
+
                         </div>
                         <div className="academic-report-grading">
                           <span className="eyebrow">GRADING SCALE</span>
-                          <table className="grading-table"><thead><tr><th>Grade</th><th>Range</th><th>Status</th></tr></thead>
-                            <tbody>
-                              {[['A','80 – 100','Excellent'],['B','70 – 79','Very Good'],['C','60 – 69','Good'],['D','50 – 59','Pass'],['F','0 – 49','Fail']].map(([g, r, s]) => (
-                                <tr key={g} className={studentAcademicReport.overall_grade === g ? 'grading-row-active' : ''}><td><span className="grade-badge">{g}</span></td><td>{r}</td><td>{s}</td></tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          <div className="grading-scale-list">{[['A','80–100','Excellent'],['B','70–79','Very Good'],['C','60–69','Good'],['D','50–59','Pass'],['E','40–49','Needs Improvement'],['F','0–39','Fail']].map(([g, r, s]) => <span key={g} className={studentAcademicReport.overall_grade === g ? 'grading-scale-active' : ''}><b>{g}:</b> {r} — {s}</span>)}</div>
                         </div>
                         {(studentAcademicReport.approved_by || studentAcademicReport.published_by) ? (
                           <div className="academic-report-publication">
@@ -2464,8 +2652,10 @@ function App() {
                           </div>
                         ) : null}
                         <footer className="academic-report-signatures">
-                          <p><span>{studentAcademicReport.class_teacher || ' '}</span><strong>Class Teacher</strong><small>Date: _______________</small></p>
-                          <p><span>{studentAcademicReport.academic_officer || ' '}</span><strong>Academic Officer</strong><small>Date: _______________</small></p>
+                          {(() => { const printedOn = new Date().toLocaleString(undefined, { dateStyle: 'long', timeStyle: 'short' }); return (<>
+                          <p><span className="report-signature-line" /><strong>Class Teacher</strong><b>{studentAcademicReport.class_teacher || ' '}</b><small>Date: {printedOn}</small></p>
+                          <p><span className="report-signature-line" /><strong>Academic Officer</strong><b>{studentAcademicReport.academic_officer || ' '}</b><small>Date: {printedOn}</small></p>
+                          </>); })()}
                         </footer>
                       </> : null}
                     </div>
@@ -2499,25 +2689,6 @@ function App() {
                   setNavigationSection(action.section);
                 }}>{action.label}<span aria-hidden="true">→</span></button>)}
               </div>
-            </section>
-
-            <section className="panel dashboard-notifications" aria-label="Notifications">
-              <div className="panel-header"><div><span className="eyebrow">For your account</span><h3>Notifications</h3></div><span className="notification-count">{dashboard.notifications.reduce((total, item) => total + item.count, 0)}</span></div>
-              {dashboard.notifications.length ? (
-                <ul className="notification-list">
-                  {dashboard.notifications.map((notification) => (
-                    <li key={`${notification.title}-${notification.status_filter}`}>
-                      <span className="notification-badge">{notification.count}</span>
-                      <div><strong>{notification.title}</strong><p>{notification.message}</p></div>
-                      <button type="button" className="dashboard-panel-link" onClick={() => {
-                        setResultStatusFilter(notification.status_filter);
-                        if (user.role === 'TEACHER') setTeacherResultsView('');
-                        setNavigationSection(notification.section);
-                      }}>View <span aria-hidden="true">→</span></button>
-                    </li>
-                  ))}
-                </ul>
-              ) : <p className="empty-note">You have no pending notifications for this term.</p>}
             </section>
 
             {['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? <section className={`dashboard-review-callout ${reviewQueueCount ? 'has-review-items' : ''}`}>
@@ -2575,7 +2746,7 @@ function App() {
               </table>
             </section>
           </>
-        ) : isAdminWorkspace || user.role === 'STUDENT' ? null : (
+        ) : isAdminWorkspace || user.role === 'STUDENT' || activeSection === 'Profile' || activeSection === 'Account Settings' ? null : (
           <section className="role-home panel">
             <div className="role-home-icon">{roleLabel.charAt(0)}</div>
             <span className="eyebrow">YOUR ROLE-BASED ACCESS</span>

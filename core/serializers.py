@@ -493,6 +493,7 @@ class BulkResultWriteSerializer(serializers.Serializer):
     academic_year_id = serializers.PrimaryKeyRelatedField(source='academic_year', queryset=AcademicYear.objects.all())
     term_id = serializers.PrimaryKeyRelatedField(source='term', queryset=Term.objects.all())
     assessment_type = serializers.CharField(max_length=40)
+    submit = serializers.BooleanField(required=False, default=False)
     rows = serializers.ListField(child=serializers.DictField(), min_length=1)
 
     def validate(self, attrs):
