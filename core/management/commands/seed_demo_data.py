@@ -108,7 +108,7 @@ class Command(BaseCommand):
                     academic_year=year,
                     term=term,
                     assessment_type='CAT 1',
-                    defaults={'marks': Decimal(70 + index * 5), 'entered_by': teacher_user, 'status': Result.ResultStatus.APPROVED},
+                    defaults={'marks': Decimal(70 + index * 5), 'entered_by': teacher_user, 'status': Result.ResultStatus.PUBLISHED},
                 )
                 result.grade = Result.calculate_grade(result.marks)
                 result.save(update_fields=['marks', 'grade', 'status', 'entered_by'])
