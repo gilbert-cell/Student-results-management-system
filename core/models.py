@@ -240,6 +240,24 @@ class Result(models.Model):
         return f'{self.student} - {self.subject} ({self.grade})'
 
 
+class AssessmentWeight(models.Model):
+    """Weight assigned to one assessment type for a subject in a term."""
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='assessment_weights')
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='assessment_weights')
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='assessment_weights')
+    assessment_type = models.CharField(max_length=40)
+    weight = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(0), MaxValueValidator(100)])
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=('subject', 'academic_year', 'term', 'assessment_type'), name='unique_assessment_weight'),
+            models.CheckConstraint(condition=models.Q(weight__gte=0) & models.Q(weight__lte=100), name='assessment_weight_between_0_and_100'),
+        ]
+
+    def __str__(self):
+        return f'{self.subject.code} {self.assessment_type}: {self.weight}%'
+
+
 class ResultApproval(models.Model):
     result = models.ForeignKey(Result, on_delete=models.CASCADE, related_name='approvals')
     approved_by = models.ForeignKey(

@@ -1797,13 +1797,14 @@ tbody tr:hover { background: #f8faff; }
 }
 .academic-report-brand { display: flex; align-items: center; gap: 18px; }
 .academic-report-logo { display: grid; flex: 0 0 94px; width: 94px; height: 94px; place-items: center; border-radius: 50%; background: linear-gradient(145deg,#087cc5,#073b79); }
+.academic-report-logo-image { flex: 0 0 78px; width: 78px; height: 78px; object-fit: contain; }
 .academic-report-logo svg { width: 74px; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .academic-report-logo circle { fill: none; }
 .academic-report-brand-rule { align-self: stretch; width: 2px; background: #0b5ca8; }
 .academic-report-school { display: block; color: #092e5c; font-size: clamp(1.3rem,3vw,2.3rem); font-weight: 900; letter-spacing: .015em; text-transform: uppercase; }
 #student-result-slip .academic-report-heading h2 { margin: 3px 0 2px; color: #1264a8; font-size: clamp(1.15rem,2.5vw,1.8rem); letter-spacing: 0; font-weight: 600; }
 #student-result-slip .academic-report-heading p { color: #164a7e; }
-#student-result-slip .academic-report-facts { grid-template-columns: repeat(4,minmax(0,1fr)); gap: 0; margin: 0 0 22px; padding: 14px 12px; border: 1px solid #93c5fd; border-radius: 9px; background: #e8f4ff; }
+#student-result-slip .academic-report-facts { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 0; margin: 0 0 22px; padding: 14px 12px; border: 1px solid #93c5fd; border-radius: 9px; background: #e8f4ff; }
 #student-result-slip .academic-report-facts p { display: grid; align-content: start; gap: 3px; min-width: 0; padding: 4px 15px; border: 0; border-right: 1px solid #93c5fd; }
 #student-result-slip .academic-report-facts p:last-child { border-right: 0; }
 .report-fact-icon { color: #0865b1; font-size: 1.15rem; font-weight: 900; }
@@ -1821,12 +1822,19 @@ tbody tr:hover { background: #f8faff; }
 #student-result-slip .academic-report-table tr:last-child td { border-bottom: 0; }
 #student-result-slip .academic-report-table th:last-child,
 #student-result-slip .academic-report-table td:last-child { border-right: 0; }
+.academic-report-contact { margin: 3px 0 6px; color: #164a7e; font-size: .76rem; }
+.assessment-breakdown-cell { min-width: 155px; max-width: 240px; text-align: left !important; line-height: 1.45; }
+.mark-method, .grade-description { display: block; margin-top: 3px; color: #164a7e; font-size: .68rem; line-height: 1.25; }
+.missing-mark-note { display: block; margin-top: 3px; color: #9a3412; font-size: .66rem; font-weight: 750; }
+.academic-report-approval-comment { margin: 8px 0 0; color: #164a7e; font-size: .76rem; }
 #student-result-slip .academic-report-summary { display: grid; grid-template-columns: minmax(0,.95fr) minmax(0,1.25fr); gap: 10px 18px; margin: 0 0 14px; padding: 16px; border-radius: 10px; background: #e8f4ff; }
 .academic-report-score-summary { display: grid; grid-template-columns: 1fr .65fr; align-content: start; gap: 10px; }
 .academic-report-score-summary p { min-width: 0; padding: 5px 10px; border-right: 1px solid #93c5fd; }
 .academic-report-score-summary p strong { color: #104b91; font-size: .9rem; }
 #student-result-slip .academic-report-score-summary .report-average { color: #0c3970; font-size: 2.35rem; line-height: 1.1; }
-#student-result-slip .academic-report-score-summary .report-grade { color: #0c3970; font-size: 2.35rem; line-height: 1.1; }
+#student-result-slip .academic-report-score-summary .report-grade { display: grid; gap: 2px; color: #0c3970; line-height: 1.1; }
+#student-result-slip .academic-report-score-summary .report-grade b { font-size: 2.2rem; }
+#student-result-slip .academic-report-score-summary .report-grade small { color: #164a7e; font-size: .78rem; font-weight: 650; }
 .academic-report-score-summary .report-overall-status { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; border-top: 1px solid #93c5fd; border-right: 0; }
 .academic-report-comment { overflow: hidden; border: 1px solid #93c5fd; border-radius: 8px; background: #fff; }
 .academic-report-comment > div { padding: 7px 12px; background: #d8ecff; color: #104b91; font-size: .8rem; font-weight: 850; text-transform: uppercase; }
@@ -1841,6 +1849,7 @@ tbody tr:hover { background: #f8faff; }
 #student-result-slip .academic-report-signatures { gap: 50px; margin: 22px 7% 0; }
 #student-result-slip .academic-report-signatures p { gap: 4px; color: #123565; }
 #student-result-slip .academic-report-signatures .report-signature-line { min-height: 28px; border-bottom: 1px solid #2874b8; }
+#student-result-slip .academic-report-signatures .report-approval-label { display: grid; justify-items: center; gap: 2px; min-height: 0; border: 0; text-align: center; }
 #student-result-slip .academic-report-signatures strong { color: #104b91; }
 #student-result-slip .academic-report-signatures b { min-height: 1em; font-size: .85rem; }
 #student-result-slip .academic-report-signatures small { color: #164a7e; }
@@ -1863,22 +1872,25 @@ tbody tr:hover { background: #f8faff; }
   #student-result-slip .student-result-slip-content { max-width: none; padding: 0; border: 0; }
   #student-result-slip .academic-report-heading { margin-bottom: 10px; padding-bottom: 9px; }
   .academic-report-logo { flex-basis: 70px; width: 70px; height: 70px; }
+  .academic-report-logo-image { flex-basis: 64px; width: 64px; height: 64px; }
   .academic-report-logo svg { width: 56px; }
   #student-result-slip .academic-report-facts { margin-bottom: 12px; padding: 8px; }
   #student-result-slip .academic-report-facts p { padding: 3px 9px; }
   .academic-report-section-title { margin-bottom: 8px; font-size: 1.25rem; }
   #student-result-slip .academic-report-table th,
   #student-result-slip .academic-report-table td { padding: 7px 6px; font-size: .76rem; }
+  #student-result-slip .assessment-breakdown-cell { min-width: 125px; max-width: 175px; }
   #student-result-slip .academic-report-summary { gap: 7px 12px; margin-bottom: 8px; padding: 10px; }
-  #student-result-slip .academic-report-score-summary .report-average,
-  #student-result-slip .academic-report-score-summary .report-grade { font-size: 2rem; }
+  #student-result-slip .academic-report-score-summary .report-average { font-size: 2rem; }
+  #student-result-slip .academic-report-score-summary .report-grade b { font-size: 1.9rem; }
   .academic-report-comment p { padding: 7px 9px; font-size: .76rem; }
   #student-result-slip .academic-report-grading { margin-bottom: 8px; padding: 7px 10px; }
   #student-result-slip .academic-report-signatures { margin-top: 13px; }
-  #student-result-slip .academic-report-table,
   #student-result-slip .academic-report-summary,
   #student-result-slip .academic-report-grading,
   #student-result-slip .academic-report-signatures { break-inside: avoid; }
+  #student-result-slip .academic-report-table thead { display: table-header-group; }
+  #student-result-slip .academic-report-table tr { break-inside: avoid; }
   #student-result-slip .academic-report-logo,
   #student-result-slip .academic-report-facts,
   #student-result-slip .academic-report-table th,

@@ -11,6 +11,7 @@ from .authentication_views import (
 )
 from .views import (
     academic_years,
+    assessment_weights,
     audit_logs,
     bulk_approve_results,
     bulk_create_results,
@@ -49,6 +50,7 @@ urlpatterns = [
     path('auth/reset-password/', reset_password, name='reset_password'),
     path('dashboard/', dashboard_summary, name='dashboard_summary'),
     path('academic-years/', academic_years, name='academic_years'),
+    path('assessment-weights/', assessment_weights, name='assessment_weights'),
     path('academic-years/<int:year_id>/', manage_academic_year, name='manage_academic_year'),
     path('terms/', terms, name='terms'),
     path('terms/<int:term_id>/', manage_term, name='manage_term'),

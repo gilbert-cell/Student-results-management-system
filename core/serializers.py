@@ -4,6 +4,7 @@ from django.db import transaction
 
 from .models import (
     AcademicYear,
+    AssessmentWeight,
     AuditLog,
     Enrollment,
     Result,
@@ -290,6 +291,39 @@ class TermWriteSerializer(serializers.ModelSerializer):
             start_date < academic_year.start_date or end_date > academic_year.end_date
         ):
             raise serializers.ValidationError('Term dates must fall within the academic year.')
+        return attrs
+
+
+class AssessmentWeightSerializer(serializers.ModelSerializer):
+    subject_id = serializers.PrimaryKeyRelatedField(source='subject', queryset=Subject.objects.all())
+    academic_year_id = serializers.PrimaryKeyRelatedField(source='academic_year', queryset=AcademicYear.objects.all())
+    term_id = serializers.PrimaryKeyRelatedField(source='term', queryset=Term.objects.all())
+
+    class Meta:
+        model = AssessmentWeight
+        fields = ('id', 'subject_id', 'academic_year_id', 'term_id', 'assessment_type', 'weight')
+        read_only_fields = ('id',)
+
+    def validate(self, attrs):
+        subject = attrs.get('subject', getattr(self.instance, 'subject', None))
+        year = attrs.get('academic_year', getattr(self.instance, 'academic_year', None))
+        term = attrs.get('term', getattr(self.instance, 'term', None))
+        assessment_type = attrs.get('assessment_type', getattr(self.instance, 'assessment_type', ''))
+        weight = attrs.get('weight', getattr(self.instance, 'weight', 0))
+        if subject and year and term and AssessmentWeight.objects.filter(
+            subject=subject, academic_year=year, term=term, assessment_type__iexact=assessment_type,
+        ).exclude(pk=getattr(self.instance, 'pk', None)).exists():
+            raise serializers.ValidationError({'assessment_type': 'This assessment type already has a weight for this subject and term.'})
+        if year and term and term.academic_year_id != year.id:
+            raise serializers.ValidationError({'term_id': 'The term must belong to the selected academic year.'})
+        if subject and year and subject.school_class.academic_year_id != year.id:
+            raise serializers.ValidationError({'subject_id': 'The subject class must belong to the selected academic year.'})
+        existing = AssessmentWeight.objects.filter(subject=subject, academic_year=year, term=term)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        total = sum((row.weight for row in existing), weight * 0) + weight
+        if total > 100:
+            raise serializers.ValidationError({'weight': 'Assessment weights for a subject and term cannot total more than 100%.'})
         return attrs
 
 

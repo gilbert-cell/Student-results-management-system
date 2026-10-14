@@ -1,4 +1,4 @@
-﻿import { FormEvent, ReactElement, useEffect, useMemo, useState } from 'react';
+import { FormEvent, ReactElement, useEffect, useMemo, useState } from 'react';
 import './App.css';
 
 type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TEACHER' | 'STUDENT' | 'ACADEMIC_OFFICER';
@@ -93,19 +93,26 @@ type ResultRecord = {
 
 type StudentAcademicReport = {
   school_name: string;
+  school_logo_url: string;
+  school_address: string;
+  school_phone: string;
+  school_email: string;
   student: { name: string; admission_number: string; class_name: string };
   academic_year: string;
   term: string;
-  subjects: { subject: string; marks: number; grade: string; remarks: string; position: number | null; class_size: number }[];
+  subjects: { subject: string; marks: number | null; grade: string | null; grade_description: string | null; outcome: string | null; remarks: string; position: number | null; class_size: number; weighted: boolean; has_missing_assessments: boolean; assessment_breakdown: { assessment_type: string; marks: number | null; weight: number | null }[] }[];
   average: number | null;
   overall_grade: string | null;
+  overall_grade_description: string;
   overall_status: string;
+  overall_comment: string | null;
   position: number | null;
   class_size: number;
   class_teacher: string;
   academic_officer: string;
   approved_by: string;
   approved_at: string | null;
+  approval_comment: string;
   published_by: string;
   published_at: string | null;
 };
@@ -117,8 +124,9 @@ const emptyAcademicYearForm: AcademicYearForm = { name: '', start_date: '', end_
 type TermOption = { id: number; name: string; academic_year: { id: number; name?: string; start_date?: string; end_date?: string }; start_date?: string; end_date?: string; is_active?: boolean };
 type ManagedTerm = { id: number; name: string; academic_year: { id: number; name: string; start_date: string; end_date: string }; start_date: string; end_date: string; is_active: boolean };
 type TermForm = { academic_year_id: string; name: string; start_date: string; end_date: string; is_active: boolean };
+type AssessmentWeightRecord = { id: number; subject_id: number; academic_year_id: number; term_id: number; assessment_type: string; weight: string | number };
 const emptyTermForm: TermForm = { academic_year_id: '', name: '', start_date: '', end_date: '', is_active: false };
-type SubjectOption = { id: number; code: string; name: string; school_class: { id: number; name: string } };
+type SubjectOption = { id: number; code: string; name: string; school_class: { id: number; name: string; academic_year: { id: number; name?: string } } };
 type EnrollmentOption = { student: { id: number; full_name: string; admission_number: string }; school_class: { id: number }; academic_year: { id: number }; term: { id: number } };
 type ResultForm = { student_id: string; subject_id: string; academic_year_id: string; term_id: string; assessment_type: string; marks: string; remarks: string };
 type DashboardNotification = { title: string; message: string; count: number; section: string; status_filter: string };
@@ -193,6 +201,7 @@ const sidebarIconShapes: Record<string, ReactElement> = {
   'Academic Settings': <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M16 3v4M8 3v4M3 10h18M8 14h2m4 0h2m-8 3h2" /></>,
   'Academic Years': <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M16 3v4M8 3v4M3 10h18M8 14h3m-3 3h7" /></>,
   Terms: <><rect x="4" y="4" width="16" height="17" rx="2" /><path d="M8 2v4m8-4v4M4 9h16m-11 4h2m3 0h2m-7 4h2" /></>,
+  'Assessment Weights': <><path d="M4 20h16M6 16l4-4 3 2 5-7" /><path d="M15 7h3v3" /></>,
   Results: <><path d="M7 3h8l4 4v14H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" /><path d="M15 3v5h5M9 14l2 2 4-4" /></>,
   Reports: <><path d="M4 20V10m5 10V4m5 16v-7m5 7V7M2 20h20" /></>,
   Users: <><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z" /><path d="m9 11 2 2 4-4" /></>,
@@ -225,10 +234,10 @@ const roleAccess: Record<Role, string[]> = {
   SUPER_ADMIN: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Academic Years', 'Terms', 'Results', 'Reports', 'Users', 'Audit Logs'],
   ADMIN: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Academic Years', 'Terms', 'Results', 'Reports', 'Users', 'Audit Logs'],
   TEACHER: ['Dashboard', 'Students', 'My Classes', 'My Subjects', 'Enter Results', 'Submitted Results', 'Reports'],
-  STUDENT: ['Dashboard', 'My Profile', 'My Results', 'My Performance', 'Result Slip'],
+  STUDENT: ['Dashboard', 'My Profile', 'My Subjects', 'My Results', 'My Performance', 'Result Slip'],
   ACADEMIC_OFFICER: ['Dashboard', 'Students', 'Teachers', 'Classes', 'Subjects', 'Terms', 'Results', 'Reports'],
 };
-const studentWorkspaceItems = ['My Profile', 'My Results', 'My Performance', 'Result Slip'];
+const studentWorkspaceItems = ['My Profile', 'My Subjects', 'My Results', 'My Performance', 'Result Slip'];
 
 const emptyDashboard: DashboardData = {
   stats: { students: 0, teachers: 0, classes: 0, subjects: 0, approved_results: 0, pending_results: 0, published_results: 0, average_performance: null },
@@ -305,6 +314,14 @@ function formatTermName(name: string): string {
     .replace(/(semester|term|quarter)(\d)/gi, '$1 $2')
     .replace(/\b(\w)/g, (c) => c.toUpperCase())
     .trim();
+}
+
+function formatReportTimestamp(value: string | null): string {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ''
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function formatOrdinal(value: number): string {
@@ -425,6 +442,9 @@ function App() {
   const [resultYears, setResultYears] = useState<AcademicYearOption[]>([]);
   const [resultTerms, setResultTerms] = useState<TermOption[]>([]);
   const [resultSubjects, setResultSubjects] = useState<SubjectOption[]>([]);
+  const [studentAssignedSubjects, setStudentAssignedSubjects] = useState<ManagedSubjectRecord[]>([]);
+  const [studentSubjectsError, setStudentSubjectsError] = useState('');
+  const [isLoadingStudentSubjects, setIsLoadingStudentSubjects] = useState(false);
   const [resultEnrollments, setResultEnrollments] = useState<EnrollmentOption[]>([]);
   const [managedAcademicYears, setManagedAcademicYears] = useState<ManagedAcademicYear[]>([]);
   const [academicYearForm, setAcademicYearForm] = useState<AcademicYearForm>(emptyAcademicYearForm);
@@ -434,6 +454,11 @@ function App() {
   const [academicYearNotice, setAcademicYearNotice] = useState('');
   const [isLoadingAcademicYears, setIsLoadingAcademicYears] = useState(false);
   const [isSavingAcademicYear, setIsSavingAcademicYear] = useState(false);
+  const [assessmentWeights, setAssessmentWeights] = useState<AssessmentWeightRecord[]>([]);
+  const [weightForm, setWeightForm] = useState({ subject_id: '', academic_year_id: '', term_id: '', assessment_type: '', weight: '' });
+  const [weightMessage, setWeightMessage] = useState('');
+  const [weightError, setWeightError] = useState('');
+  const [isSavingWeight, setIsSavingWeight] = useState(false);
   const [managedTerms, setManagedTerms] = useState<ManagedTerm[]>([]);
   const [termForm, setTermForm] = useState<TermForm>(emptyTermForm);
   const [editingTermId, setEditingTermId] = useState<number | null>(null);
@@ -572,6 +597,58 @@ function App() {
       });
     return () => controller.abort();
   }, [user, activeSection]);
+
+  useEffect(() => {
+    if (!user || user.role !== 'STUDENT' || activeSection !== 'Students' || studentWorkspaceView !== 'My Subjects') return;
+    const controller = new AbortController();
+    setIsLoadingStudentSubjects(true);
+    setStudentSubjectsError('');
+    readApi<ManagedSubjectRecord[]>('/subjects/', controller.signal)
+      .then((subjects) => setStudentAssignedSubjects(subjects))
+      .catch((error: Error) => {
+        if (error.name !== 'AbortError') setStudentSubjectsError(getSafeErrorMessage(error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsLoadingStudentSubjects(false);
+      });
+    return () => controller.abort();
+  }, [user, activeSection, studentWorkspaceView]);
+
+  useEffect(() => {
+    if (!user || activeSection !== 'Assessment Weights') return;
+    const controller = new AbortController();
+    Promise.all([
+      readApi<AssessmentWeightRecord[]>('/assessment-weights/', controller.signal),
+      readApi<AcademicYearOption[]>('/academic-years/', controller.signal),
+      readApi<TermOption[]>('/terms/', controller.signal),
+      readApi<SubjectOption[]>('/subjects/', controller.signal),
+    ]).then(([weights, years, terms, subjects]) => {
+      setAssessmentWeights(weights);
+      setResultYears(years);
+      setResultTerms(terms);
+      setResultSubjects(subjects);
+    }).catch((error: Error) => {
+      if (error.name !== 'AbortError') setWeightError(getSafeErrorMessage(error));
+    });
+    return () => controller.abort();
+  }, [user, activeSection]);
+
+  async function saveAssessmentWeight(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSavingWeight(true); setWeightError(''); setWeightMessage('');
+    try {
+      const response = await fetch(`${apiRoot}/assessment-weights/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+        body: JSON.stringify({ ...weightForm, weight: Number(weightForm.weight) }),
+      });
+      const saved = await readResponse<AssessmentWeightRecord>(response);
+      setAssessmentWeights((rows) => [...rows.filter((row) => !(row.subject_id === saved.subject_id && row.academic_year_id === saved.academic_year_id && row.term_id === saved.term_id && row.assessment_type === saved.assessment_type)), saved]);
+      setWeightMessage('Assessment weight saved. Configure all assessment types to total 100% for weighted grades to apply.');
+      setWeightForm({ ...weightForm, assessment_type: '', weight: '' });
+    } catch (error) { setWeightError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to save assessment weight.'); }
+    finally { setIsSavingWeight(false); }
+  }
 
   useEffect(() => {
     if (!user || !['My Classes', 'My Subjects'].includes(activeSection)) return;
@@ -1988,7 +2065,7 @@ function App() {
               <details className="nav-group" open>
                 <summary className="nav-group-toggle"><SidebarIcon name="Academic Settings" />Academic Settings<span className="nav-chevron" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg></span></summary>
                 <div className="nav-group-items">
-                  {['Academic Years', 'Terms'].map((item) => (
+                  {['Academic Years', 'Terms', 'Assessment Weights'].map((item) => (
                     <button key={item} type="button" onClick={() => setNavigationSection(item)} className={`nav-item nav-subitem ${isNavigationItemActive(item) ? 'active' : ''}`} aria-current={activeSection === item ? 'page' : undefined}>
                       <SidebarIcon name={item} />{item}
                     </button>
@@ -2017,7 +2094,7 @@ function App() {
             </button>
             <div>
               <span className="eyebrow">{roleLabel.toUpperCase()} WORKSPACE</span>
-              <h2>{activeSection === 'Dashboard' ? 'Student Results Management System' : activeSection === 'Profile' ? 'My Profile' : activeSection === 'Account Settings' ? 'Account Settings' : activeSection === 'Students' && user.role === 'STUDENT' ? studentWorkspaceView : activeSection === 'Students' ? 'Student directory' : activeSection === 'My Classes' ? 'My classes' : activeSection === 'My Subjects' ? 'My subjects' : activeSection === 'Teachers' ? 'Teacher directory' : activeSection === 'Classes' ? 'Class management' : activeSection === 'Subjects' ? 'Subject management' : activeSection === 'Users' ? 'User management' : activeSection === 'Audit Logs' ? 'Audit logs' : activeSection === 'Academic Years' ? 'Academic year settings' : activeSection === 'Terms' ? 'Term settings' : activeSection === 'Results' ? 'Results workflow' : `Welcome, ${user.name}`}</h2>
+              <h2>{activeSection === 'Dashboard' ? 'Student Results Management System' : activeSection === 'Profile' ? 'My Profile' : activeSection === 'Account Settings' ? 'Account Settings' : activeSection === 'Students' && user.role === 'STUDENT' ? studentWorkspaceView : activeSection === 'Students' ? 'Student directory' : activeSection === 'My Classes' ? 'My classes' : activeSection === 'My Subjects' ? 'My subjects' : activeSection === 'Teachers' ? 'Teacher directory' : activeSection === 'Classes' ? 'Class management' : activeSection === 'Subjects' ? 'Subject management' : activeSection === 'Users' ? 'User management' : activeSection === 'Audit Logs' ? 'Audit logs' : activeSection === 'Academic Years' ? 'Academic year settings' : activeSection === 'Terms' ? 'Term settings' : activeSection === 'Assessment Weights' ? 'Assessment weighting' : activeSection === 'Results' ? 'Results workflow' : `Welcome, ${user.name}`}</h2>
               {activeSection === 'Dashboard' ? <p className="dashboard-context">{dashboard.academic_context.academic_year && dashboard.academic_context.term ? `${dashboard.academic_context.academic_year} \u00b7 ${dashboard.academic_context.term}` : 'No active academic year and term'}</p> : null}
             </div>
           </div>
@@ -2145,6 +2222,29 @@ function App() {
               </table>
             </div>
             {isLoadingTerms ? <p className="empty-note">Loading terms...</p> : null}
+          </section>
+        ) : activeSection === 'Assessment Weights' && isAdminWorkspace ? (
+          <section className="panel data-management-panel">
+            <div className="panel-header"><div><span className="eyebrow">Grading policy</span><h3>Assessment weights</h3></div></div>
+            <p className="empty-note">Set a percentage for each assessment type in a subject and term. Published report cards apply weighting only when configured types total 100% and each has marks; otherwise they retain the arithmetic average.</p>
+            {weightError ? <p className="dashboard-error" role="alert">{weightError}</p> : null}
+            {weightMessage ? <p className="user-management-notice" role="status">{weightMessage}</p> : null}
+            <form className="academic-year-form" onSubmit={saveAssessmentWeight}>
+              <div className="academic-year-grid">
+                <label className="form-field"><span>Academic year</span><select required value={weightForm.academic_year_id} onChange={(event) => setWeightForm({ ...weightForm, academic_year_id: event.target.value, term_id: '' })}><option value="">Select year</option>{resultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                <label className="form-field"><span>Term</span><select required value={weightForm.term_id} onChange={(event) => setWeightForm({ ...weightForm, term_id: event.target.value })}><option value="">Select term</option>{resultTerms.filter((term) => String(term.academic_year.id) === weightForm.academic_year_id).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
+                <label className="form-field"><span>Subject</span><select required value={weightForm.subject_id} onChange={(event) => setWeightForm({ ...weightForm, subject_id: event.target.value })}><option value="">Select subject</option>{resultSubjects.filter((subject) => String(subject.school_class.academic_year.id) === weightForm.academic_year_id).map((subject) => <option key={subject.id} value={subject.id}>{subject.name} · {subject.school_class.name}</option>)}</select></label>
+                <label className="form-field"><span>Assessment type</span><input required maxLength={40} value={weightForm.assessment_type} onChange={(event) => setWeightForm({ ...weightForm, assessment_type: event.target.value })} placeholder="e.g. CAT" /></label>
+                <label className="form-field"><span>Weight (%)</span><input required type="number" min="0.01" max="100" step="0.01" value={weightForm.weight} onChange={(event) => setWeightForm({ ...weightForm, weight: event.target.value })} /></label>
+              </div>
+              <div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingWeight}>{isSavingWeight ? 'Saving...' : 'Save weight'}</button></div>
+            </form>
+            <div className="table-scroll"><table><thead><tr><th>Subject</th><th>Year</th><th>Term</th><th>Assessment</th><th>Weight</th></tr></thead><tbody>{assessmentWeights.map((row) => {
+              const subject = resultSubjects.find((item) => item.id === row.subject_id);
+              const year = resultYears.find((item) => item.id === row.academic_year_id);
+              const term = resultTerms.find((item) => item.id === row.term_id);
+              return <tr key={row.id}><td>{subject?.name || `Subject ${row.subject_id}`}</td><td>{year?.name || '—'}</td><td>{term?.name || '—'}</td><td>{row.assessment_type}</td><td>{row.weight}%</td></tr>;
+            })}{!assessmentWeights.length ? <tr><td colSpan={5} className="empty-table">No assessment weights configured.</td></tr> : null}</tbody></table></div>
           </section>
         ) : activeSection === 'Academic Years' && isAdminWorkspace ? (
           <section className="panel academic-year-panel">
@@ -2592,59 +2692,87 @@ function App() {
                 <div className="student-profile" id={user.role !== 'STUDENT' || studentWorkspaceView === 'Result Slip' ? 'student-result-slip' : undefined}>
                   {user.role === 'STUDENT' && studentWorkspaceView === 'My Profile' ? (
                     <section className="student-workspace-card"><span className="eyebrow">Personal details</span><h2>{selectedStudent.full_name}</h2><div className="profile-facts"><p><strong>Admission number</strong><span>{selectedStudent.admission_number}</span></p><p><strong>Class</strong><span>{selectedStudent.current_class || '—'}</span></p><p><strong>Date of birth</strong><span>{selectedStudent.date_of_birth || '—'}</span></p><p><strong>Gender</strong><span>{selectedStudent.gender || '—'}</span></p><p><strong>Parent / guardian</strong><span>{selectedStudent.parent_name || '—'}</span></p><p><strong>Email</strong><span>{selectedStudent.user?.email || '—'}</span></p></div></section>
+                  ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Subjects' ? (
+                    <section className="student-workspace-card">
+                      <div className="panel-header"><div><span className="eyebrow">School assigned subjects</span><h3>My subjects</h3></div></div>
+                      <p className="empty-note">The school assigns subjects through your class for each academic year. Contact the school if this list is incorrect.</p>
+                      <label className="form-field performance-filters"><span>Academic year</span><select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All enrolled years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                      {studentSubjectsError ? <p className="dashboard-error" role="alert">{studentSubjectsError}</p> : null}
+                      {isLoadingStudentSubjects ? <p className="empty-note" role="status">Loading your assigned subjects...</p> : null}
+                      <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Code</th><th>Class</th><th>Academic year</th><th>Teacher</th></tr></thead><tbody>
+                        {studentAssignedSubjects.filter((subject) => !studentResultYearFilter || String(subject.school_class.academic_year.id) === studentResultYearFilter).map((subject) => <tr key={subject.id}><td>{subject.name}</td><td>{subject.code}</td><td>{subject.school_class.name}</td><td>{subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Not assigned'}</td></tr>)}
+                        {!studentAssignedSubjects.filter((subject) => !studentResultYearFilter || String(subject.school_class.academic_year.id) === studentResultYearFilter).length && !isLoadingStudentSubjects ? <tr><td colSpan={5} className="empty-table">No subjects are assigned for this academic year.</td></tr> : null}
+                      </tbody></table></div>
+                    </section>
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Results' ? (
-                    <section className="student-workspace-card"><div className="panel-header result-slip-header"><div><span className="eyebrow">Published results</span><h3>My results</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label></div></div><div className="table-scroll">{studentResultsTable}</div></section>
+                    <section className="student-workspace-card">
+                      <div className="panel-header result-slip-header"><div><span className="eyebrow">Published results</span><h3>My results</h3></div></div>
+                      <div className="result-slip-actions performance-filters">
+                        <label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                        <label>Semester / term<select value={studentResultTermFilter} disabled={!studentResultYearFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms in year</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label>
+                      </div>
+                      <div className="table-scroll">{studentResultsTable}</div>
+                    </section>
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Performance' ? (
-                    <section className="student-workspace-card"><div className="panel-header"><div><span className="eyebrow">Published assessment results</span><h3>My performance</h3></div></div><div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label></div><section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong>{studentOverallAverage === null ? '—' : `${studentOverallAverage.toFixed(1)}%`}</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td>{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
+                    <section className="student-workspace-card"><div className="panel-header"><div><span className="eyebrow">Published assessment results</span><h3>My performance</h3></div></div>
+                      <div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Semester / term<select value={studentResultTermFilter} disabled={!studentResultYearFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms in year</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label></div>
+                      <section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong>{studentOverallAverage === null ? '—' : `${studentOverallAverage.toFixed(1)}%`}</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td>{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
                   ) : (
                     <div className="student-result-slip-content">
-                      <div className="panel-header result-slip-header report-controls"><div><span className="eyebrow">Published results</span><h3>Student academic report</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">Select year</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)} disabled={!studentResultYearFilter}><option value="">Select term</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label><button className="sign-in-btn print-btn" type="button" onClick={() => window.print()} disabled={!studentAcademicReport || isLoadingStudentReport}>Print / Save as PDF</button>
-                        <button className="ghost-btn" type="button" disabled={!studentAcademicReport || isLoadingStudentReport} onClick={() => {
+                      <div className="panel-header result-slip-header report-controls"><div><span className="eyebrow">Published results</span><h3>Student academic report</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">Select year</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Semester / term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)} disabled={!studentResultYearFilter}><option value="">Select term</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label>
+                        <button className="sign-in-btn print-btn" type="button" disabled={!studentAcademicReport || isLoadingStudentReport} onClick={() => {
                           if (!studentAcademicReport) return;
-                          const el = document.getElementById('student-result-slip');
-                          if (!el) return;
-                          const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Result Slip</title><style>body{font-family:sans-serif;padding:24px;color:#111}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccc;padding:8px;text-align:left}th{background:#f5f5f5}.grade-badge{font-weight:bold}.report-signature-line{display:block;border-top:1px solid #333;width:160px;margin-bottom:4px}</style></head><body>${el.innerHTML}</body></html>`;
-                          const blob = new Blob([html], { type: 'text/html' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `result-slip-${studentAcademicReport.student.admission_number}-${studentAcademicReport.term.replace(/\s+/g, '-')}.html`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                        }}>Download</button></div></div>
+                          const previousTitle = document.title;
+                          document.title = `result-slip-${studentAcademicReport.student.admission_number}-${studentAcademicReport.term.replace(/\s+/g, '-')}`;
+                          window.addEventListener('afterprint', () => { document.title = previousTitle; }, { once: true });
+                          window.print();
+                        }}>Download PDF</button></div></div>
                       {studentReportError ? <p className="dashboard-error report-screen-message" role="alert">{studentReportError}</p> : null}
                       {isLoadingStudentReport ? <p className="empty-note report-screen-message">Preparing academic report...</p> : null}
                       {!studentResultYearFilter || !studentResultTermFilter ? <p className="empty-note report-screen-message">Select an academic year and term to view the student report.</p> : null}
                       {studentAcademicReport ? <>
                         <header className="academic-report-heading">
                           <div className="academic-report-brand">
-                            <div><h2>Student Academic Report</h2><p>{studentAcademicReport.academic_year} · {formatTermName(studentAcademicReport.term)}</p></div>
+                            {studentAcademicReport.school_logo_url ? <img className="academic-report-logo-image" src={studentAcademicReport.school_logo_url} alt={`${studentAcademicReport.school_name || 'School'} logo`} /> : null}
+                            <div>
+                              {studentAcademicReport.school_name ? <strong className="academic-report-school">{studentAcademicReport.school_name}</strong> : null}
+                              {(studentAcademicReport.school_address || studentAcademicReport.school_phone || studentAcademicReport.school_email) ? <p className="academic-report-contact">{[studentAcademicReport.school_address, studentAcademicReport.school_phone, studentAcademicReport.school_email].filter(Boolean).join(' · ')}</p> : null}
+                              <h2>Student Academic Report</h2><p>{studentAcademicReport.academic_year} · {formatTermName(studentAcademicReport.term)}</p>
+                            </div>
                           </div>
                         </header>
                         <div className="academic-report-facts">
                           <p><span className="report-fact-icon" aria-hidden="true">♟</span><strong>Student Name</strong><b>{studentAcademicReport.student.name}</b></p>
                           <p><span className="report-fact-icon" aria-hidden="true">▤</span><strong>Student ID</strong><b>{studentAcademicReport.student.admission_number}</b></p>
                           <p><span className="report-fact-icon" aria-hidden="true">◆</span><strong>Class</strong><b>{studentAcademicReport.student.class_name}</b></p>
-                          <p><span className="report-fact-icon" aria-hidden="true">▦</span><strong>Academic Year</strong><b>{studentAcademicReport.academic_year} — {formatTermName(studentAcademicReport.term)}</b></p>
                         </div>
                         <h3 className="academic-report-section-title"><span />Academic Performance<span /></h3>
                         <div className="table-scroll academic-report-table">
-                          <table><thead><tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Remarks</th></tr></thead>
+                          <table><thead><tr><th>Subject</th><th>Assessment breakdown</th><th>Final mark</th><th>Grade</th><th>Outcome</th></tr></thead>
                             <tbody>
-                              {studentAcademicReport.subjects.map((row) => <tr key={row.subject}><td>{row.subject}</td><td>{row.marks.toFixed(2).replace(/\.00$/, '')}</td><td><span className="grade-badge">{row.grade}</span></td><td>{row.remarks}</td></tr>)}
-                              {!studentAcademicReport.subjects.length ? <tr><td colSpan={4} className="empty-table">No published results are available for this term.</td></tr> : null}
+                              {studentAcademicReport.subjects.map((row) => <tr key={row.subject}>
+                                <td>{row.subject}</td>
+                                <td className="assessment-breakdown-cell">
+                                  {row.assessment_breakdown.map((assessment) => `${assessment.assessment_type}: ${assessment.marks === null ? 'Missing' : assessment.marks.toFixed(2).replace(/\.00$/, '')}${assessment.weight === null ? '' : ` (${assessment.weight}% weight)`}`).join(' · ') || 'No assessment breakdown available'}
+                                  {row.has_missing_assessments ? <strong className="missing-mark-note">Published assessment marks are incomplete</strong> : null}
+                                </td>
+                                <td>{row.marks === null ? '—' : <><strong>{row.marks.toFixed(2).replace(/\.00$/, '')}</strong><small className="mark-method">{row.weighted ? 'Weighted final mark' : 'Arithmetic average'}</small></>}</td>
+                                <td>{row.grade ? <><span className="grade-badge">{row.grade}</span><small className="grade-description">{row.grade_description}</small></> : '—'}</td>
+                                <td>{row.outcome ? <span className={`report-status-badge ${row.outcome.toLowerCase()}`}>{row.outcome}</span> : <span className="missing-mark-note">Incomplete</span>}</td>
+                              </tr>)}
+                              {!studentAcademicReport.subjects.length ? <tr><td colSpan={5} className="empty-table">No published results are available for this term.</td></tr> : null}
                             </tbody>
                           </table>
                         </div>
                         <div className="academic-report-summary">
                           <div className="academic-report-score-summary">
                             <p><strong>Overall Average</strong><span className="report-average">{studentAcademicReport.average === null ? '—' : `${studentAcademicReport.average}%`}</span></p>
-                            <p><strong>Grade</strong><span className="report-grade">{studentAcademicReport.overall_grade || '—'}</span></p>
+                            <p><strong>Overall Grade</strong><span className="report-grade">{studentAcademicReport.overall_grade ? <><b>{studentAcademicReport.overall_grade}</b><small>{studentAcademicReport.overall_grade_description}</small></> : '—'}</span></p>
                             <p className="report-overall-status"><strong>Overall Status</strong><span className={`report-status-badge ${(studentAcademicReport.overall_status || '').toLowerCase()}`}>{studentAcademicReport.overall_status || '—'}</span></p>
                           </div>
                           <div className="academic-report-comment">
-                            <div><strong>Remarks / Comments</strong></div>
-                            <p>{studentAcademicReport.subjects.map((row) => row.remarks).filter((remark) => remark && remark !== 'No remarks').join(' ') || 'No teacher remarks have been recorded for this term.'}</p>
+                            <div><strong>Overall Teacher Comment</strong></div>
+                            <p>{studentAcademicReport.overall_comment || 'No overall comment provided.'}</p>
                           </div>
 
                         </div>
@@ -2654,11 +2782,10 @@ function App() {
                         </div>
 
                         <footer className="academic-report-signatures">
-                          {(() => { const printedOn = new Date().toLocaleString(undefined, { dateStyle: 'long', timeStyle: 'short' }); return (<>
-                          <p><span className="report-signature-line" /><strong>Class Teacher</strong><b>{studentAcademicReport.class_teacher || ' '}</b><small>Date: {printedOn}</small></p>
-                          <p><span className="report-signature-line" /><strong>Academic Officer</strong><b>{studentAcademicReport.academic_officer || ' '}</b><small>Date: {printedOn}</small></p>
-                          </>); })()}
+                          <p><span className="report-signature-line" /><strong>Class Teacher</strong><b>{studentAcademicReport.class_teacher || ' '}</b></p>
+                          {studentAcademicReport.approved_at ? <p><span className="report-signature-line" /><span className="report-approval-label"><strong>Approved by</strong><b>{studentAcademicReport.approved_by || ' '}</b><strong>Academic Officer</strong></span><small>{formatReportTimestamp(studentAcademicReport.approved_at)}</small></p> : null}
                         </footer>
+                        {studentAcademicReport.approval_comment ? <p className="academic-report-approval-comment"><strong>Approval comment:</strong> {studentAcademicReport.approval_comment}</p> : null}
                       </> : null}
                     </div>
                   )}

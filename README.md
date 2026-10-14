@@ -23,7 +23,7 @@ The API is the authorization boundary. The frontend hides navigation that does n
 2. Copy `.env.example` to `.env`. For a local SQLite setup, set `DB_ENGINE=sqlite` and `DJANGO_DEBUG=true`.
 3. Run `python manage.py migrate` and `python manage.py seed_demo_data`.
 4. Start the API with `python manage.py runserver`.
-5. Optionally set `SCHOOL_NAME` in the backend `.env` to print your institution's name on generated reports. In `frontend`, copy `.env.example` to `.env`, then run `npm install` and `npm start`. Set `REACT_APP_API_URL` if the API is not at `http://localhost:8000/api` and restart the frontend after changing it.
+5. Optionally set `SCHOOL_NAME`, `SCHOOL_LOGO_URL`, `SCHOOL_ADDRESS`, `SCHOOL_PHONE`, and `SCHOOL_EMAIL` in the backend `.env` to add school identity and contact details to report slips. In `frontend`, copy `.env.example` to `.env`, then run `npm install` and `npm start`. Set `REACT_APP_API_URL` if the API is not at `http://localhost:8000/api` and restart the frontend after changing it.
 
 ## PostgreSQL
 
@@ -46,6 +46,9 @@ Enable `DJANGO_SECURE_SSL_REDIRECT=true` only after the site and reverse proxy a
 - Academic year and term creation/editing is available from Academic Settings; only administrators manage academic years, while administrators and academic officers manage terms.
 - Role-protected students, teachers, classes, subjects, enrollments, and results.
 - Result review, publication, scoped performance reports, and admin/academic-officer audit-log reads.
+- Per-subject assessment weights configured by administrators in Academic Settings. A report applies them when weights total 100% and every configured assessment type has published marks; other cases retain the arithmetic mean.
+- Student academic-year and term choices are limited to the student's own enrollments or published results. The backend always scopes result and report-slip reads to the authenticated student.
+- Subject assignment is school-managed: administrators add subjects to the class/Form for an academic year, then enroll students in that class. Students see the assigned-subject list but cannot change it; no duplicate student-selected registration model is used.
 - Student and teacher account creation uses Django's password hashing.
 
 ## Role access
@@ -64,6 +67,8 @@ Permissions are enforced by the API on every request; hiding a navigation item i
 
 The current system represents Head of School access through the combined `ACADEMIC_OFFICER` role (`Head/Academic Officer`). It does not yet provide a separate Head of School account role; that role therefore shares the academic officer's permissions in the application.
 
+In the school-managed subject policy, the administrator creates a class for a Form and academic year, assigns permitted subjects to that class, and enrolls the student. Existing class, subject, and term enrollment records are the source of truth for assigned subjects and results. Create a new class/enrollment for each academic year to preserve progression history.
+
 | Capability | Super Admin | Admin | Academic officer | Teacher | Student |
 | --- | --- | --- | --- | --- | --- |
 | Dashboard and performance reports | All | All | All | Assigned | Own |
@@ -71,7 +76,7 @@ The current system represents Head of School access through the combined `ACADEM
 | Create/view students | Yes | Yes | View all | Assigned roster | Own record |
 | Create/view teachers | Yes | Yes | View | No | No |
 | Create/view classes | Yes | Yes | Yes | Assigned view | No |
-| Create/view subjects | Yes | Yes | Yes | Assigned view | Enrolled subjects view |
+| Create/view subjects | Yes | Yes | Yes | Assigned view | School-assigned subjects for own enrollments |
 | Create/view academic years | Yes | Yes | View | Read all | Read all |
 | Create/view terms | Yes | Yes | Yes | Read all | Read all |
 | Create/view enrolments | Yes | Yes | Yes | Assigned view | Own enrolments |
@@ -89,7 +94,7 @@ Deployment configuration such as secret keys, database credentials, allowed host
 
 Result reviews lock the result row while checking and applying a workflow transition, so simultaneous approval/rejection attempts cannot both succeed from the same previous state. Enrollment uniqueness and result uniqueness/mark-range rules are also enforced by database constraints.
 
-The dashboard's active-term average is currently the arithmetic mean of published assessment result records. It does not apply CAT/exam weights; the institution's official weighting policy should be configured before treating this as a final student aggregate. List endpoints currently return full result sets, so pagination is a future scalability improvement for larger school deployments.
+Dashboard averages, top-student averages, school performance summaries, report-card marks, and cohort rankings apply assessment weights when a complete 100% policy is configured for the subject and term; otherwise they use the arithmetic mean. Configure weights in **Academic Settings → Assessment Weights**. Published student report slips identify whether each subject mark is weighted. List endpoints currently return full result sets, so pagination and additional server-side filters remain scalability improvements for larger school deployments.
 
 ## Result workflow
 

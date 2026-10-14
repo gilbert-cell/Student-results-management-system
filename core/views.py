@@ -10,6 +10,7 @@ from rest_framework.response import Response
 
 from .models import (
     AcademicYear,
+    AssessmentWeight,
     AuditLog,
     Enrollment,
     Result,
@@ -32,11 +33,13 @@ from .permissions import (
     IsResultReader,
     IsReviewer,
 )
+from .grading import assessment_average
 
 ADMIN_ROLES = (User.Role.SUPER_ADMIN, User.Role.ADMIN)
 from .serializers import (
     AcademicYearSerializer,
     AuditLogSerializer,
+    AssessmentWeightSerializer,
     BulkApprovalSerializer,
     BulkEnrollmentSerializer,
     BulkResultWriteSerializer,
@@ -76,12 +79,6 @@ def dashboard_summary(request):
     classes = SchoolClass.objects.all()
     subjects = Subject.objects.all()
     result_set = Result.objects.all()
-    top_result_filter = Q(results__status=Result.ResultStatus.PUBLISHED)
-    if active_year and active_term:
-        top_result_filter &= Q(results__academic_year=active_year, results__term=active_term)
-    else:
-        top_result_filter &= Q(results__pk__isnull=True)
-
     if role == User.Role.TEACHER:
         subjects = subjects.filter(teacher__user=request.user)
         classes = classes.filter(
@@ -96,17 +93,12 @@ def dashboard_summary(request):
             Q(subject__teacher__user=request.user)
             | Q(subject__school_class__teacher__user=request.user),
         ).distinct()
-        top_result_filter &= (
-            Q(results__subject__teacher__user=request.user)
-            | Q(results__subject__school_class__teacher__user=request.user)
-        )
     elif role == User.Role.STUDENT:
         students = students.filter(user=request.user)
         teachers = Teacher.objects.none()
         classes = SchoolClass.objects.none()
         subjects = Subject.objects.none()
         result_set = result_set.filter(student__user=request.user, status=Result.ResultStatus.PUBLISHED)
-        top_result_filter &= Q(results__student__user=request.user)
 
     approved_results = result_set.filter(status__in=[Result.ResultStatus.APPROVED, Result.ResultStatus.PUBLISHED]).count()
     current_term_results = result_set
@@ -120,13 +112,40 @@ def dashboard_summary(request):
         Result.ResultStatus.SUBMITTED,
         Result.ResultStatus.UNDER_REVIEW,
     ]).count()
-    average_performance = published_results.aggregate(average=Avg('marks'))['average']
+    published_rows = list(published_results.values('student_id', 'subject_id', 'assessment_type', 'marks'))
+    weight_map = {}
+    if active_year and active_term:
+        for item in AssessmentWeight.objects.filter(
+            subject_id__in={row['subject_id'] for row in published_rows},
+            academic_year=active_year, term=active_term,
+        ).values('subject_id', 'assessment_type', 'weight'):
+            weight_map.setdefault(item['subject_id'], {})[item['assessment_type']] = float(item['weight'])
+    student_subject_assessments = {}
+    for row in published_rows:
+        key = (row['student_id'], row['subject_id'])
+        student_subject_assessments.setdefault(key, {}).setdefault(row['assessment_type'], []).append(float(row['marks']))
+    student_subject_marks = {}
+    for key, assessments in student_subject_assessments.items():
+        student_subject_marks[key] = assessment_average(assessments, weight_map.get(key[1], {}))[0]
+    average_performance = (
+        sum(student_subject_marks.values()) / len(student_subject_marks)
+        if student_subject_marks else None
+    )
+    student_averages = {}
+    for (student_id, _subject_id), mark in student_subject_marks.items():
+        student_averages.setdefault(student_id, []).append(mark)
+    visible_student_ids = set(students.values_list('id', flat=True))
+    top_student_ids = sorted(
+        ((student_id, sum(marks) / len(marks)) for student_id, marks in student_averages.items()
+         if student_id in visible_student_ids and marks),
+        key=lambda row: row[1], reverse=True,
+    )[:5]
+    top_students = {
+        student.pk: student for student in Student.objects.filter(pk__in=[row[0] for row in top_student_ids]).select_related('user')
+    }
     recent_results = result_set.select_related(
         'student__user', 'subject', 'term', 'academic_year', 'entered_by', 'approved_by'
     ).prefetch_related('approvals__approved_by').order_by('-updated_at')[:6]
-    top_students = students.annotate(
-        avg_marks=Avg('results__marks', filter=top_result_filter)
-    ).filter(avg_marks__isnull=False).select_related('user').order_by('-avg_marks')[:5]
     status_counts = current_term_results.values('status').annotate(total=Count('id'))
     status_totals = {row['status']: row['total'] for row in status_counts}
     notifications = []
@@ -176,13 +195,45 @@ def dashboard_summary(request):
         'recent_results': ResultSerializer(recent_results, many=True, context={'request': request}).data,
         'top_students': [
             {
-                'name': student.user.get_full_name() or student.user.username,
-                'average': round(float(student.avg_marks or 0), 2),
-                'admission_number': student.admission_number,
+                'name': top_students[student_id].user.get_full_name() or top_students[student_id].user.username,
+                'average': round(float(average), 2),
+                'admission_number': top_students[student_id].admission_number,
             }
-            for student in top_students
+            for student_id, average in top_student_ids if student_id in top_students
         ],
     })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAnySystemRole])
+def assessment_weights(request):
+    if request.method == 'GET':
+        rows = AssessmentWeight.objects.select_related('subject', 'academic_year', 'term')
+        if request.user.role == User.Role.TEACHER:
+            rows = rows.filter(Q(subject__teacher__user=request.user) | Q(subject__school_class__teacher__user=request.user))
+        elif request.user.role == User.Role.STUDENT:
+            rows = rows.none()
+        return Response(AssessmentWeightSerializer(rows.order_by('subject__name', 'assessment_type'), many=True).data)
+    if request.user.role not in ADMIN_ROLES:
+        return Response({'detail': 'Only administrators may configure assessment weights.'}, status=status.HTTP_403_FORBIDDEN)
+    existing = None
+    try:
+        subject_id = int(request.data.get('subject_id'))
+        year_id = int(request.data.get('academic_year_id'))
+        term_id = int(request.data.get('term_id'))
+        assessment_type = str(request.data.get('assessment_type', '')).strip()
+        existing = AssessmentWeight.objects.filter(
+            subject_id=subject_id, academic_year_id=year_id, term_id=term_id,
+            assessment_type__iexact=assessment_type,
+        ).first()
+    except (TypeError, ValueError):
+        pass
+    serializer = AssessmentWeightSerializer(existing, data=request.data)
+    if serializer.is_valid():
+        weight = serializer.save()
+        AuditLog.objects.create(actor=request.user, action='UPDATE' if existing else 'CREATE', model_name='AssessmentWeight', description=f'Set {weight.assessment_type} to {weight.weight}% for {weight.subject.code}, {weight.term}.')
+        return Response(AssessmentWeightSerializer(weight).data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET', 'POST'])
@@ -190,6 +241,11 @@ def dashboard_summary(request):
 def academic_years(request):
     if request.method == 'GET':
         years = AcademicYear.objects.all().order_by('-start_date')
+        if request.user.role == User.Role.STUDENT:
+            years = years.filter(
+                Q(enrollments__student__user=request.user)
+                | Q(results__student__user=request.user, results__status=Result.ResultStatus.PUBLISHED)
+            ).distinct()
         return Response(AcademicYearSerializer(years, many=True).data)
     if request.user.role not in ADMIN_ROLES:
         return Response({'detail': 'Only administrators may manage academic years.'}, status=status.HTTP_403_FORBIDDEN)
@@ -240,6 +296,11 @@ def manage_academic_year(request, year_id):
 def terms(request):
     if request.method == 'GET':
         terms_queryset = Term.objects.select_related('academic_year').order_by('academic_year__start_date', 'start_date')
+        if request.user.role == User.Role.STUDENT:
+            terms_queryset = terms_queryset.filter(
+                Q(enrollments__student__user=request.user)
+                | Q(results__student__user=request.user, results__status=Result.ResultStatus.PUBLISHED)
+            ).distinct()
         year_id = request.query_params.get('academic_year_id')
         if year_id:
             if not year_id.isdecimal():
@@ -721,6 +782,8 @@ def student_academic_report(request, student_id):
         ]
         if not accessible:
             return Response({'detail': 'You may only view reports for your assigned classes.'}, status=status.HTTP_403_FORBIDDEN)
+        accessible_ids = {school_class.id for school_class in accessible}
+        enrollments = [e for e in enrollments if e.school_class_id in accessible_ids]
         enrolled_classes = accessible
 
     published = Result.objects.filter(
@@ -734,26 +797,56 @@ def student_academic_report(request, student_id):
     # Use the first enrollment for class-level metadata (teacher, class name)
     enrollment = enrollments[0]
 
-    grouped = {}
-    for result in published:
-        row = grouped.setdefault(result.subject_id, {
-            'subject': result.subject.name,
+    grouped = {
+        subject.pk: {
+            'subject': subject.name,
             'marks': [],
+            'assessment_marks': {},
             'remarks': [],
-        })
+        }
+        for subject in Subject.objects.filter(school_class__in=enrolled_classes).only('id', 'name')
+    }
+    for result in published:
+        row = grouped[result.subject_id]
         row['marks'].append(float(result.marks))
+        row['assessment_marks'].setdefault(result.assessment_type, []).append(float(result.marks))
         if result.remarks.strip() and result.remarks.strip() not in row['remarks']:
             row['remarks'].append(result.remarks.strip())
 
     subjects = []
+    weight_rows = AssessmentWeight.objects.filter(
+        subject_id__in=grouped.keys(), academic_year=academic_year, term=term,
+    ).values('subject_id', 'assessment_type', 'weight')
+    weights_by_subject = {}
+    for weight_row in weight_rows:
+        weights_by_subject.setdefault(weight_row['subject_id'], {})[weight_row['assessment_type']] = float(weight_row['weight'])
     for subject_id, row in grouped.items():
-        mark = round(sum(row['marks']) / len(row['marks']), 2)
+        type_weights = weights_by_subject.get(subject_id, {})
+        assessment_marks = row['assessment_marks']
+        mark, weighted = assessment_average(assessment_marks, type_weights)
+        mark = round(mark, 2) if mark is not None else None
+        assessment_breakdown = [
+            {
+                'assessment_type': assessment_type,
+                'marks': round(sum(assessment_marks[assessment_type]) / len(assessment_marks[assessment_type]), 2) if assessment_type in assessment_marks else None,
+                'weight': type_weights.get(assessment_type),
+            }
+            for assessment_type in dict.fromkeys([*assessment_marks.keys(), *type_weights.keys()])
+        ]
         subjects.append({
             'subject_id': subject_id,
             'subject': row['subject'],
             'marks': mark,
-            'grade': Result.calculate_grade(mark),
-            'remarks': '; '.join(row['remarks']) or 'No remarks',
+            'weighted': weighted,
+            'assessment_breakdown': assessment_breakdown,
+            'has_missing_assessments': not assessment_marks or any(item['marks'] is None for item in assessment_breakdown),
+            'grade': Result.calculate_grade(mark) if mark is not None else None,
+            'grade_description': {
+                'A': 'Excellent', 'B': 'Very Good', 'C': 'Good',
+                'D': 'Pass', 'E': 'Needs Improvement', 'F': 'Fail',
+            }.get(Result.calculate_grade(mark)) if mark is not None else None,
+            'outcome': ('Pass' if mark >= 50 else 'Fail') if mark is not None else None,
+            'remarks': '; '.join(row['remarks']) or 'No subject remark',
         })
 
     # Build a subject_id -> school_class_id map from published results
@@ -782,16 +875,31 @@ def student_academic_report(request, student_id):
         academic_year=academic_year,
         term=term,
         status=Result.ResultStatus.PUBLISHED,
-    ).values('student_id', 'subject_id', 'subject__school_class_id').annotate(average=Avg('marks'))
+    ).values('student_id', 'subject_id', 'subject__school_class_id', 'assessment_type').annotate(average=Avg('marks'))
+    cohort_rows = list(cohort_subject_results)
+    cohort_subject_ids = {row['subject_id'] for row in cohort_rows}
+    cohort_weights = {}
+    for weight_row in AssessmentWeight.objects.filter(
+        subject_id__in=cohort_subject_ids, academic_year=academic_year, term=term,
+    ).values('subject_id', 'assessment_type', 'weight'):
+        cohort_weights.setdefault(weight_row['subject_id'], {})[weight_row['assessment_type']] = float(weight_row['weight'])
 
-    # cohort_marks_by_subject: subject_id -> [(student_id, avg_mark)] for that subject's class only
+    cohort_assessments = {}
+    class_by_subject = {}
+    for cohort_row in cohort_rows:
+        key = (cohort_row['subject_id'], cohort_row['student_id'])
+        cohort_assessments.setdefault(key, {}).setdefault(cohort_row['assessment_type'], []).append(float(cohort_row['average']))
+        class_by_subject[cohort_row['subject_id']] = cohort_row['subject__school_class_id']
+
+    # Subject ranks use each student's weighted subject mark where configured.
     cohort_marks_by_subject = {}
-    for cohort_row in cohort_subject_results:
-        subj_class_id = cohort_row['subject__school_class_id']
+    for (subject_id, student_id), assessment_marks in cohort_assessments.items():
+        student_mark, _ = assessment_average(assessment_marks, cohort_weights.get(subject_id, {}))
+        subj_class_id = class_by_subject[subject_id]
         enrolled_in_class = class_student_ids.get(subj_class_id, set())
-        if cohort_row['student_id'] in enrolled_in_class:
-            cohort_marks_by_subject.setdefault(cohort_row['subject_id'], []).append(
-                (cohort_row['student_id'], float(cohort_row['average']))
+        if student_id in enrolled_in_class:
+            cohort_marks_by_subject.setdefault(subject_id, []).append(
+                (student_id, student_mark)
             )
 
     for subject in subjects:
@@ -805,7 +913,8 @@ def student_academic_report(request, student_id):
         )
         subject['class_size'] = len(class_student_ids.get(subj_class_id, set()))
 
-    student_average = sum(row['marks'] for row in subjects) / len(subjects) if subjects else None
+    available_marks = [row['marks'] for row in subjects if row['marks'] is not None]
+    student_average = sum(available_marks) / len(available_marks) if available_marks else None
 
     # Overall position: rank within the primary class
     position = None
@@ -813,9 +922,10 @@ def student_academic_report(request, student_id):
         primary_student_ids = class_student_ids.get(primary_class_id, set())
         # Collect per-student averages for peers in the primary class
         cohort_averages = {}
-        for cohort_row in cohort_subject_results:
-            if cohort_row['student_id'] in primary_student_ids:
-                cohort_averages.setdefault(cohort_row['student_id'], []).append(float(cohort_row['average']))
+        for (subject_id, student_id), assessment_marks in cohort_assessments.items():
+            if student_id in primary_student_ids and class_by_subject[subject_id] == primary_class_id:
+                subject_mark, _ = assessment_average(assessment_marks, cohort_weights.get(subject_id, {}))
+                cohort_averages.setdefault(student_id, []).append(subject_mark)
         position = 1 + sum(
             sum(marks) / len(marks) > student_average
             for marks in cohort_averages.values()
@@ -842,29 +952,39 @@ def student_academic_report(request, student_id):
         return entry.approved_by.get_full_name() or entry.approved_by.username
 
     overall_grade = Result.calculate_grade(student_average) if student_average is not None else None
-    grade_status_map = {
+    grade_description_map = {
         'A': 'Excellent', 'B': 'Very Good', 'C': 'Good', 'D': 'Pass', 'E': 'Needs Improvement', 'F': 'Fail',
     }
+    overall_status = 'Pass' if student_average is not None and student_average >= 50 else 'Fail' if student_average is not None else ''
+
+    unique_class_names = list(dict.fromkeys(str(e.school_class) for e in enrollments))
 
     return Response({
         'school_name': getattr(settings, 'SCHOOL_NAME', ''),
+        'school_logo_url': getattr(settings, 'SCHOOL_LOGO_URL', ''),
+        'school_address': getattr(settings, 'SCHOOL_ADDRESS', ''),
+        'school_phone': getattr(settings, 'SCHOOL_PHONE', ''),
+        'school_email': getattr(settings, 'SCHOOL_EMAIL', ''),
         'student': {
             'name': student.user.get_full_name() or student.user.username,
             'admission_number': student.admission_number,
-            'class_name': ', '.join(str(e.school_class) for e in enrollments),
+            'class_name': ', '.join(unique_class_names),
         },
         'academic_year': enrollment.academic_year.name,
         'term': enrollment.term.name,
         'subjects': subjects,
         'average': round(student_average, 2) if student_average is not None else None,
         'overall_grade': overall_grade,
-        'overall_status': grade_status_map.get(overall_grade, '') if overall_grade else '',
+        'overall_grade_description': grade_description_map.get(overall_grade, '') if overall_grade else '',
+        'overall_status': overall_status,
+        'overall_comment': None,
         'position': position,
         'class_size': class_size,
         'class_teacher': (teacher.user.get_full_name() or teacher.user.username) if teacher else '',
         'academic_officer': _name(approved_entry),
         'approved_by': _name(approved_entry),
         'approved_at': approved_entry.created_at.isoformat() if approved_entry else None,
+        'approval_comment': approved_entry.comments if approved_entry else '',
         'published_by': _name(published_entry),
         'published_at': published_entry.created_at.isoformat() if published_entry else None,
     })
@@ -1228,32 +1348,48 @@ def manage_user(request, user_id):
 @api_view(['GET'])
 @permission_classes([IsAnySystemRole])
 def performance_summary(request):
-    approved_results = Q(results__status__in=[Result.ResultStatus.APPROVED, Result.ResultStatus.PUBLISHED])
-    subjects = Subject.objects.all()
+    result_rows = Result.objects.filter(status__in=[Result.ResultStatus.APPROVED, Result.ResultStatus.PUBLISHED])
     if request.user.role == User.Role.TEACHER:
-        subjects = subjects.filter(
-            Q(teacher__user=request.user) | Q(school_class__teacher__user=request.user),
-        ).distinct()
-        approved_results &= (
-            Q(results__subject__teacher__user=request.user)
-            | Q(results__subject__school_class__teacher__user=request.user)
+        result_rows = result_rows.filter(
+            Q(subject__teacher__user=request.user) | Q(subject__school_class__teacher__user=request.user),
         )
     elif request.user.role == User.Role.STUDENT:
-        subjects = subjects.filter(school_class__enrollments__student__user=request.user).distinct()
-        approved_results &= Q(results__student__user=request.user, results__status=Result.ResultStatus.PUBLISHED)
-    subject_summary = subjects.annotate(
-        average_marks=Avg('results__marks', filter=approved_results),
-        total_students=Count('results__student', filter=approved_results, distinct=True),
-    ).order_by('-average_marks')
-    payload = [
-        {
-            'code': subject.code,
-            'name': subject.name,
-            'average_marks': round(float(subject.average_marks or 0), 2),
-            'total_students': subject.total_students,
-        }
-        for subject in subject_summary[:8]
-    ]
+        result_rows = result_rows.filter(student__user=request.user, status=Result.ResultStatus.PUBLISHED)
+    rows = list(result_rows.values(
+        'student_id', 'subject_id', 'subject__code', 'subject__name',
+        'academic_year_id', 'term_id', 'assessment_type', 'marks',
+    ))
+    policy_map = {}
+    for policy in AssessmentWeight.objects.filter(
+        subject_id__in={row['subject_id'] for row in rows},
+        academic_year_id__in={row['academic_year_id'] for row in rows},
+        term_id__in={row['term_id'] for row in rows},
+    ).values('subject_id', 'academic_year_id', 'term_id', 'assessment_type', 'weight'):
+        key = (policy['subject_id'], policy['academic_year_id'], policy['term_id'])
+        policy_map.setdefault(key, {})[policy['assessment_type']] = float(policy['weight'])
+    grouped_results = {}
+    subject_names = {}
+    for row in rows:
+        key = (row['student_id'], row['subject_id'], row['academic_year_id'], row['term_id'])
+        grouped_results.setdefault(key, {}).setdefault(row['assessment_type'], []).append(float(row['marks']))
+        subject_names[row['subject_id']] = (row['subject__code'], row['subject__name'])
+    subject_marks = {}
+    subject_students = {}
+    for (student_id, subject_id, year_id, term_id), assessments in grouped_results.items():
+        mark, _ = assessment_average(assessments, policy_map.get((subject_id, year_id, term_id), {}))
+        subject_marks.setdefault(subject_id, []).append(mark)
+        subject_students.setdefault(subject_id, set()).add(student_id)
+    payload = []
+    for subject_id, marks in subject_marks.items():
+        code, name = subject_names[subject_id]
+        payload.append({
+            'code': code,
+            'name': name,
+            'average_marks': round(sum(marks) / len(marks), 2),
+            'total_students': len(subject_students[subject_id]),
+        })
+    payload.sort(key=lambda item: item['average_marks'], reverse=True)
+    payload = payload[:8]
     return Response({'subjects': payload})
 
 

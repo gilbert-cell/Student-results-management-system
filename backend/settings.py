@@ -201,6 +201,10 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 SCHOOL_NAME = os.environ.get('SCHOOL_NAME', '').strip()
+SCHOOL_LOGO_URL = os.environ.get('SCHOOL_LOGO_URL', '').strip()
+SCHOOL_ADDRESS = os.environ.get('SCHOOL_ADDRESS', '').strip()
+SCHOOL_PHONE = os.environ.get('SCHOOL_PHONE', '').strip()
+SCHOOL_EMAIL = os.environ.get('SCHOOL_EMAIL', '').strip()
 
 LOGGING = {
     'version': 1,
