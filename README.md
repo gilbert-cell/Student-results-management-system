@@ -104,6 +104,6 @@ UNDER_REVIEW -> APPROVED -> PUBLISHED
 UNDER_REVIEW -> RETURNED -> DRAFT
 ```
 
-Teachers enter marks for assigned subjects. An administrator or academic officer reviews them; the person who entered a result cannot review that same result. Students can read their own results only after publication. Approval decisions are retained in result approval history and the audit log.
+Teachers enter marks for assigned subjects through the enrolled-student roster or by importing an Excel workbook (`.xlsx`/`.xls`) with `Student ID` (the student's admission number) and `Marks` columns; an optional `Name` column is checked against the roster. Imported marks appear in the roster for review before saving. An administrator or academic officer reviews them; the person who entered a result cannot review that same result. Students can read their own results only after publication. Approval decisions are retained in result approval history and the audit log.
 
 Run database schema updates with `python manage.py migrate` after pulling changes.

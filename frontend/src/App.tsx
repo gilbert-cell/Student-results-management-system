@@ -1,5 +1,6 @@
 import { FormEvent, ReactElement, useEffect, useMemo, useState } from 'react';
 import './App.css';
+import * as XLSX from 'xlsx';
 
 type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TEACHER' | 'STUDENT' | 'ACADEMIC_OFFICER';
 
@@ -418,6 +419,7 @@ function App() {
   const [bulkError, setBulkError] = useState('');
   const [bulkNotice, setBulkNotice] = useState('');
   const [isSavingBulk, setIsSavingBulk] = useState(false);
+  const [bulkImportMessage, setBulkImportMessage] = useState('');
   // Bulk approval
   const [bulkApprovalIds, setBulkApprovalIds] = useState<Set<number>>(new Set());
   const [bulkApprovalComments, setBulkApprovalComments] = useState('');
@@ -1373,6 +1375,52 @@ function App() {
       setBulkError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to save results.');
     } finally {
       setIsSavingBulk(false);
+    }
+  }
+
+  async function handleMarksSpreadsheet(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setBulkError('');
+    setBulkImportMessage('');
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+      if (!rows.length) throw new Error('The first worksheet has no student rows.');
+      const normalize = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[ _-]+/g, ' ');
+      const headers = Object.keys(rows[0]);
+      const admissionHeader = headers.find((header) => ['student id', 'admission number', 'admission', 'student number'].includes(normalize(header)));
+      const nameHeader = headers.find((header) => ['name', 'student name', 'full name'].includes(normalize(header)));
+      const marksHeader = headers.find((header) => ['marks', 'mark', 'score'].includes(normalize(header)));
+      if (!admissionHeader || !marksHeader) throw new Error('Required columns: Student ID (admission number) and Marks. A Name column is recommended.');
+      const roster = new Map(bulkRows.map((student) => [normalize(student.admission), student]));
+      const seen = new Set<string>();
+      const matched: typeof bulkRows = [];
+      const issues: string[] = [];
+      rows.forEach((row, index) => {
+        const admission = normalize(row[admissionHeader]);
+        const markValue = String(row[marksHeader] ?? '').trim();
+        if (!admission && !markValue) return;
+        if (admission && !markValue) return;
+        if (!admission) { issues.push(`Row ${index + 2}: Student ID is missing.`); return; }
+        if (seen.has(admission)) { issues.push(`Row ${index + 2}: duplicate Student ID ${admission}.`); return; }
+        seen.add(admission);
+        const student = roster.get(admission);
+        if (!student) { issues.push(`Row ${index + 2}: ${admission} is not enrolled in the selected subject class and term.`); return; }
+        const name = nameHeader ? normalize(row[nameHeader]) : '';
+        if (name && name !== normalize(student.name)) { issues.push(`Row ${index + 2}: name does not match Student ID ${admission}.`); return; }
+        if (!markValue || !Number.isFinite(Number(markValue)) || Number(markValue) < 0 || Number(markValue) > 100) {
+          issues.push(`Row ${index + 2}: marks must be a number from 0 to 100.`); return;
+        }
+        matched.push({ ...student, marks: markValue });
+      });
+      if (!matched.length) throw new Error(issues[0] || 'No valid student marks found in the spreadsheet.');
+      setBulkRows((previous) => previous.map((student) => matched.find((row) => row.student_id === student.student_id) || student));
+      setBulkImportMessage(`${matched.length} marks loaded for review.${issues.length ? ` ${issues.length} row(s) need correction; ${issues.slice(0, 3).join(' ')}` : ''}`);
+    } catch (error) {
+      setBulkError(error instanceof Error ? error.message : 'Unable to read this Excel file.');
     }
   }
 
@@ -2374,6 +2422,7 @@ function App() {
                 {resultOptionsError ? <p className="dashboard-error" role="alert">{resultOptionsError}</p> : null}
                 {bulkError ? <p className="dashboard-error" role="alert">{bulkError}</p> : null}
                 {bulkNotice ? <p className="user-management-notice" role="status">{bulkNotice}</p> : null}
+                {bulkImportMessage ? <p className="user-management-notice" role="status">{bulkImportMessage}</p> : null}
                 <div className="result-entry-grid" style={{ marginBottom: 14 }}>
                   <label className="form-field"><span>Academic year</span>
                     <select value={bulkContext.academic_year_id} onChange={(e) => setBulkContext({ ...bulkContext, academic_year_id: e.target.value, term_id: '', subject_id: '' })}>
@@ -2393,6 +2442,13 @@ function App() {
                   <label className="form-field"><span>Assessment type</span>
                     <input maxLength={40} value={bulkContext.assessment_type} onChange={(e) => setBulkContext({ ...bulkContext, assessment_type: e.target.value })} placeholder="e.g. CAT 1" />
                   </label>
+                </div>
+                <div className="user-form-actions" style={{ marginBottom: 14 }}>
+                  <label className="ghost-btn" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
+                    Import Excel marks
+                    <input type="file" accept=".xlsx,.xls" onChange={handleMarksSpreadsheet} style={{ display: 'none' }} disabled={!bulkRows.length} />
+                  </label>
+                  <span className="empty-note">First worksheet columns: Student ID (admission number), Name (optional), Marks. Check imported marks below before saving.</span>
                 </div>
                 {bulkRows.length > 0 ? (
                   <>
