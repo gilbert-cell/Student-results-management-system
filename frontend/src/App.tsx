@@ -450,6 +450,7 @@ function App() {
   const [bulkEnrollError, setBulkEnrollError] = useState('');
   const [bulkEnrollNotice, setBulkEnrollNotice] = useState('');
   const [showPromotionForm, setShowPromotionForm] = useState(false);
+  const [promotionStep, setPromotionStep] = useState<1 | 2 | 3>(1);
   const [promotionSource, setPromotionSource] = useState({ academic_year_id: '', term_id: '', school_class_id: '' });
   const [promotionTarget, setPromotionTarget] = useState({ academic_year_id: '', term_id: '', school_class_id: '' });
   const [promotionPassMark, setPromotionPassMark] = useState('50');
@@ -1665,6 +1666,7 @@ function App() {
       const preview = await readApi<PromotionPreview>(`/reports/promotion-preview/?${query.toString()}`);
       setPromotionPreview(preview);
       setPromotionStudentIds(new Set(preview.eligible.map((student) => student.id)));
+      setPromotionStep(2);
     } catch (error) {
       setPromotionPreview(null);
       setPromotionStudentIds(new Set());
@@ -1684,6 +1686,7 @@ function App() {
     setPromotionTarget({ academic_year_id: '', term_id: '', school_class_id: '' });
     setPromotionPreview(null);
     setPromotionStudentIds(new Set());
+    setPromotionStep(1);
     setPromotionError('');
     setPromotionNotice('');
     setShowPromotionForm(true);
@@ -3100,28 +3103,36 @@ function App() {
                   {bulkImportNotice && bulkImportRole === 'STUDENT' ? <><p className="user-management-notice" role="status">{bulkImportNotice}</p>{bulkActivationRecords.length ? <div className="import-preview"><strong>Save these temporary login details</strong><p className="empty-note">Give each student their username and temporary password. The system will require a password change at first login.</p><div className="table-scroll"><table><thead><tr><th>Admission number</th><th>Student</th><th>Username</th><th>Temporary password</th></tr></thead><tbody>{bulkActivationRecords.map((record) => <tr key={record.admission_number}><td>{record.admission_number}</td><td>{record.full_name}</td><td>{record.username}</td><td><code>{record.temporary_password}</code></td></tr>)}</tbody></table></div><button className="ghost-btn" type="button" onClick={() => { const rows = [['Admission number', 'Student', 'Username', 'Temporary password'], ...bulkActivationRecords.map((record) => [record.admission_number, record.full_name, record.username, record.temporary_password])]; const csv = rows.map((row) => row.map((value) => `"${value.replace(/"/g, '""')}"`).join(',')).join('\r\n'); const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'student-login-details.csv'; link.click(); URL.revokeObjectURL(url); }}>Download login details</button></div> : null}</> : null}
                   {showPromotionForm ? <form className="academic-year-form enrollment-form" onSubmit={handlePromoteStudents}>
                     <div className="user-form-heading"><span className="eyebrow">Academic year transition</span><h3>Promote students</h3></div>
-                    <p className="empty-note">Choose the completed year, class and term to preview published results. Select eligible students, then choose their destination year, class and term.</p>
+                    <p className="empty-note">Step {promotionStep} of 3 · Source results → eligible students → destination enrollment.</p>
                     {promotionError ? <p className="dashboard-error" role="alert">{promotionError}</p> : null}
                     {promotionNotice ? <p className="user-management-notice" role="status">{promotionNotice}</p> : null}
-                    <div className="user-form-heading"><h4>Students to promote from</h4></div>
+                    {promotionStep === 1 ? <>
+                    <div className="user-form-heading"><h4>Step 1: Validate source year, term and class</h4></div>
                     <div className="academic-year-grid">
                       <label className="form-field"><span>Academic year</span><select required value={promotionSource.academic_year_id} onChange={(event) => { const yearId = event.target.value; const nextTerm = managedTerms.find((term) => String(term.academic_year.id) === yearId && term.is_active) || managedTerms.find((term) => String(term.academic_year.id) === yearId); setPromotionSource({ academic_year_id: yearId, term_id: nextTerm ? String(nextTerm.id) : '', school_class_id: '' }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source year</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
                       <label className="form-field"><span>Source term</span><select required value={promotionSource.term_id} onChange={(event) => { setPromotionSource({ ...promotionSource, term_id: event.target.value }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source term</option>{managedTerms.filter((term) => String(term.academic_year.id) === promotionSource.academic_year_id).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
                       <label className="form-field"><span>Source class</span><select required value={promotionSource.school_class_id} onChange={(event) => { setPromotionSource({ ...promotionSource, school_class_id: event.target.value }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source class</option>{managedClasses.filter((schoolClass) => String(schoolClass.academic_year.id) === promotionSource.academic_year_id).map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</option>)}</select></label>
                       <label className="form-field"><span>Pass mark (%)</span><input type="number" min={0} max={100} step="0.01" value={promotionPassMark} onChange={(event) => { setPromotionPassMark(event.target.value); setPromotionPreview(null); setPromotionStudentIds(new Set()); }} /></label>
                     </div>
-                    <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={loadPromotionPreview} disabled={isLoadingPromotionPreview}>{isLoadingPromotionPreview ? 'Preparing preview...' : 'Preview eligible students'}</button></div>
-                    {promotionPreview ? <>
+                    <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={loadPromotionPreview} disabled={isLoadingPromotionPreview}>{isLoadingPromotionPreview ? 'Preparing preview...' : 'Validate and preview results'}</button></div>
+                    </> : null}
+                    {promotionStep === 2 && promotionPreview ? <>
+                      <div className="user-form-heading"><h4>Step 2: Select eligible students</h4></div>
                       <div className="import-preview"><strong>Promotion preview</strong><p>Students: {promotionPreview.summary.total} · Eligible: {promotionPreview.summary.eligible} · Not eligible: {promotionPreview.summary.not_eligible} · No published results: {promotionPreview.summary.no_results}</p><p>Pass mark: {promotionPreview.pass_mark}%</p></div>
                       {promotionPreview.eligible.length ? <div className="table-scroll"><table className="data-management-table"><thead><tr><th><input type="checkbox" aria-label="Select all eligible students" checked={promotionStudentIds.size === promotionPreview.eligible.length && promotionPreview.eligible.length > 0} onChange={(event) => setPromotionStudentIds(event.target.checked ? new Set(promotionPreview.eligible.map((student) => student.id)) : new Set())} /></th><th>Admission no.</th><th>Student</th><th>Average</th></tr></thead><tbody>{promotionPreview.eligible.map((student) => <tr key={student.id}><td><input type="checkbox" checked={promotionStudentIds.has(student.id)} onChange={(event) => setPromotionStudentIds((previous) => { const next = new Set(previous); event.target.checked ? next.add(student.id) : next.delete(student.id); return next; })} /></td><td>{student.admission_number}</td><td>{student.name}</td><td>{student.average?.toFixed(2)}%</td></tr>)}</tbody></table></div> : <p className="empty-note">No students meet the selected pass mark.</p>}
+                      <p className="empty-note">Selected: {promotionStudentIds.size} of {promotionPreview.eligible.length} eligible students.</p>
+                      <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={() => { setPromotionStep(1); setPromotionError(''); }}>Back to source details</button><button className="primary-btn" type="button" disabled={!promotionStudentIds.size} onClick={() => { setPromotionError(''); setPromotionStep(3); }}>Continue to destination</button></div>
                     </> : null}
-                    <div className="user-form-heading"><h4>Promote selected students to</h4></div>
+                    {promotionStep === 3 ? <>
+                    <div className="user-form-heading"><h4>Step 3: Validate destination class and term</h4></div>
                     <div className="academic-year-grid">
                       <label className="form-field"><span>Academic year</span><select required value={promotionTarget.academic_year_id} onChange={(event) => setPromotionTarget({ academic_year_id: event.target.value, school_class_id: '', term_id: '' })}><option value="">Select target year</option>{managedAcademicYears.filter((year) => String(year.id) !== promotionSource.academic_year_id).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
                       <label className="form-field"><span>Target class</span><select required value={promotionTarget.school_class_id} onChange={(event) => setPromotionTarget({ ...promotionTarget, school_class_id: event.target.value })}><option value="">Select target class</option>{managedClasses.filter((schoolClass) => String(schoolClass.academic_year.id) === promotionTarget.academic_year_id).map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</option>)}</select></label>
                       <label className="form-field"><span>Target term</span><select required value={promotionTarget.term_id} onChange={(event) => setPromotionTarget({ ...promotionTarget, term_id: event.target.value })}><option value="">Select target term</option>{managedTerms.filter((term) => String(term.academic_year.id) === promotionTarget.academic_year_id).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
                     </div>
-                    <div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isPromotingStudents || !promotionPreview || !promotionStudentIds.size}>{isPromotingStudents ? 'Promoting...' : `Promote ${promotionStudentIds.size || ''} selected student(s)`}</button><button className="ghost-btn" type="button" onClick={() => { setShowPromotionForm(false); setPromotionError(''); }}>Close</button></div>
+                    <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={() => { setPromotionStep(2); setPromotionError(''); }}>Back to student selection</button><button className="primary-btn" type="submit" disabled={isPromotingStudents || !promotionPreview || !promotionStudentIds.size || !promotionTarget.academic_year_id || !promotionTarget.school_class_id || !promotionTarget.term_id}>{isPromotingStudents ? 'Promoting...' : `Promote ${promotionStudentIds.size} selected student(s)`}</button></div>
+                    </> : null}
+                    <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={() => { setShowPromotionForm(false); setPromotionError(''); }}>Close</button></div>
                   </form> : null}
                   {showBulkImport && bulkImportRole === 'STUDENT' ? (
                     <form className="academic-year-form" onSubmit={handleBulkImport}>
