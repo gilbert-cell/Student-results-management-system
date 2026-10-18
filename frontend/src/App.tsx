@@ -35,6 +35,8 @@ type StudentSummary = {
   average: number;
   admission_number: string;
 };
+type PromotionCandidate = { id: number; name: string; admission_number: string; average: number | null };
+type PromotionPreview = { pass_mark: number; eligible: PromotionCandidate[]; not_eligible: PromotionCandidate[]; no_results: PromotionCandidate[]; summary: { eligible: number; not_eligible: number; no_results: number; total: number } };
 
 const emptyUserForm: UserForm = {
   username: '',
@@ -438,6 +440,16 @@ function App() {
   const [isSavingBulkEnroll, setIsSavingBulkEnroll] = useState(false);
   const [bulkEnrollError, setBulkEnrollError] = useState('');
   const [bulkEnrollNotice, setBulkEnrollNotice] = useState('');
+  const [showPromotionForm, setShowPromotionForm] = useState(false);
+  const [promotionSource, setPromotionSource] = useState({ academic_year_id: '', term_id: '', school_class_id: '' });
+  const [promotionTarget, setPromotionTarget] = useState({ academic_year_id: '', term_id: '', school_class_id: '' });
+  const [promotionPassMark, setPromotionPassMark] = useState('50');
+  const [promotionPreview, setPromotionPreview] = useState<PromotionPreview | null>(null);
+  const [promotionStudentIds, setPromotionStudentIds] = useState<Set<number>>(new Set());
+  const [promotionError, setPromotionError] = useState('');
+  const [promotionNotice, setPromotionNotice] = useState('');
+  const [isLoadingPromotionPreview, setIsLoadingPromotionPreview] = useState(false);
+  const [isPromotingStudents, setIsPromotingStudents] = useState(false);
   // Bulk user import
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [bulkImportRole, setBulkImportRole] = useState<'STUDENT' | 'TEACHER'>('STUDENT');
@@ -494,6 +506,8 @@ function App() {
   const [managedTeachers, setManagedTeachers] = useState<TeacherRecord[]>([]);
   const [managedClasses, setManagedClasses] = useState<SchoolClassRecord[]>([]);
   const [managedSubjects, setManagedSubjects] = useState<ManagedSubjectRecord[]>([]);
+  const [classAcademicYearFilter, setClassAcademicYearFilter] = useState('');
+  const [subjectClassFilter, setSubjectClassFilter] = useState('');
   const [dataManagementForm, setDataManagementForm] = useState<DataManagementForm>(emptyDataManagementForm);
   const [showDataManagementForm, setShowDataManagementForm] = useState(false);
   const [editingDataRecordId, setEditingDataRecordId] = useState<number | null>(null);
@@ -1087,6 +1101,12 @@ function App() {
   const studentResultTerms = resultTerms.filter((term) =>
     !studentResultYearFilter || String(term.academic_year.id) === studentResultYearFilter,
   );
+  const filteredManagedClasses = managedClasses.filter((schoolClass) =>
+    !classAcademicYearFilter || String(schoolClass.academic_year.id) === classAcademicYearFilter,
+  );
+  const filteredManagedSubjects = managedSubjects.filter((subject) =>
+    !subjectClassFilter || String(subject.school_class.id) === subjectClassFilter,
+  );
   const studentSubjectPerformance = useMemo(() => {
     const grouped = new Map<string, { name: string; marks: number[] }>();
     publishedStudentResults.forEach((result) => {
@@ -1555,6 +1575,88 @@ function App() {
       setBulkEnrollError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to enroll students.');
     } finally {
       setIsSavingBulkEnroll(false);
+    }
+  }
+
+  async function loadPromotionPreview() {
+    const validationError = firstError(
+      required(promotionSource.academic_year_id, 'Source academic year'),
+      required(promotionSource.term_id, 'Source term'),
+      required(promotionSource.school_class_id, 'Source class'),
+      !promotionPassMark || !Number.isFinite(Number(promotionPassMark)) || Number(promotionPassMark) < 0 || Number(promotionPassMark) > 100 ? 'Pass mark must be between 0 and 100.' : '',
+    );
+    if (validationError) { setPromotionError(validationError); return; }
+    setPromotionError('');
+    setPromotionNotice('');
+    setIsLoadingPromotionPreview(true);
+    try {
+      const query = new URLSearchParams();
+      query.append('source_class_ids', promotionSource.school_class_id);
+      query.set('academic_year_id', promotionSource.academic_year_id);
+      query.set('term_id', promotionSource.term_id);
+      query.set('pass_mark', promotionPassMark);
+      const preview = await readApi<PromotionPreview>(`/reports/promotion-preview/?${query.toString()}`);
+      setPromotionPreview(preview);
+      setPromotionStudentIds(new Set(preview.eligible.map((student) => student.id)));
+    } catch (error) {
+      setPromotionPreview(null);
+      setPromotionStudentIds(new Set());
+      setPromotionError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to prepare promotion preview.');
+    } finally {
+      setIsLoadingPromotionPreview(false);
+    }
+  }
+
+  function openPromotionForm() {
+    const sourceYear = managedAcademicYears.find((year) => year.is_active) || managedAcademicYears[0];
+    const sourceTerm = sourceYear
+      ? managedTerms.find((term) => term.academic_year.id === sourceYear.id && term.is_active)
+        || managedTerms.find((term) => term.academic_year.id === sourceYear.id)
+      : undefined;
+    setPromotionSource({ academic_year_id: sourceYear ? String(sourceYear.id) : '', term_id: sourceTerm ? String(sourceTerm.id) : '', school_class_id: '' });
+    setPromotionTarget({ academic_year_id: '', term_id: '', school_class_id: '' });
+    setPromotionPreview(null);
+    setPromotionStudentIds(new Set());
+    setPromotionError('');
+    setPromotionNotice('');
+    setShowPromotionForm(true);
+    setShowBulkImport(false);
+    setShowBulkEnrollForm(false);
+    setShowEnrollmentForm(false);
+  }
+
+  async function handlePromoteStudents(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const validationError = firstError(
+      !promotionPreview ? 'Preview eligible students first.' : '',
+      !promotionStudentIds.size ? 'Select at least one eligible student.' : '',
+      required(promotionTarget.academic_year_id, 'Target academic year'),
+      promotionTarget.academic_year_id === promotionSource.academic_year_id ? 'Choose a different target academic year.' : '',
+      required(promotionTarget.school_class_id, 'Target class'),
+      required(promotionTarget.term_id, 'Target term'),
+    );
+    if (validationError) { setPromotionError(validationError); return; }
+    setPromotionError('');
+    setPromotionNotice('');
+    setIsPromotingStudents(true);
+    try {
+      const response = await fetch(`${apiRoot}/students/bulk-promote/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+        body: JSON.stringify({
+          student_ids: Array.from(promotionStudentIds),
+          school_class_id: Number(promotionTarget.school_class_id),
+          academic_year_id: Number(promotionTarget.academic_year_id),
+          term_id: Number(promotionTarget.term_id),
+        }),
+      });
+      const result = await readResponse<{ created: number; skipped: number }>(response);
+      setPromotionNotice(`${result.created} student(s) promoted into the selected class.${result.skipped ? ` ${result.skipped} were already enrolled.` : ''}`);
+      setPromotionStudentIds(new Set());
+    } catch (error) {
+      setPromotionError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to promote students.');
+    } finally {
+      setIsPromotingStudents(false);
     }
   }
 
@@ -2588,6 +2690,7 @@ function App() {
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
             {structureCsvNotice && structureCsvSection === 'Classes' ? <p className="user-management-notice" role="status">{structureCsvNotice}</p> : null}
             {structureCsvError && structureCsvSection === 'Classes' ? <p className="dashboard-error" role="alert" style={{ whiteSpace: 'pre-line' }}>{structureCsvError}</p> : null}
+            <label className="form-field student-search"><span>Filter by academic year</span><select value={classAcademicYearFilter} onChange={(event) => setClassAcademicYearFilter(event.target.value)}><option value="">All academic years</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
             {showStructureCsvImport && structureCsvSection === 'Classes' ? <form className="academic-year-form" onSubmit={handleStructureCsvImport}><div className="user-form-heading"><span className="eyebrow">Class records</span><h3>Upload classes CSV</h3></div><p className="empty-note">Required columns: <code>name, academic_year</code>. Optional: <code>section, teacher_employee_id, is_active, max_optional_subjects</code>. The optional subject limit defaults to 2.</p><label className="form-field"><span>Choose CSV file</span><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; file.text().then((text) => setStructureCsvText(text)).catch(() => setStructureCsvError('Unable to read the selected CSV file.')); }} /></label><label className="form-field"><span>Or paste CSV data</span><textarea className="bulk-import-textarea" rows={6} value={structureCsvText} onChange={(event) => setStructureCsvText(event.target.value)} placeholder={'name,section,academic_year,teacher_employee_id,is_active,max_optional_subjects\nForm I,A,2026/2027,T001,true,2'} /></label><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isImportingStructureCsv}>{isImportingStructureCsv ? 'Uploading...' : 'Upload classes'}</button><button className="ghost-btn" type="button" onClick={() => setShowStructureCsvImport(false)}>Cancel</button></div></form> : null}
             {showDataManagementForm && (isAdminWorkspace || editingDataRecordId !== null) ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update class' : 'New class'}</span><h3>{editingDataRecordId ? 'Edit class details' : 'Add class'}</h3></div><div className="academic-year-grid">
               <label className="form-field"><span>Class name</span><input required maxLength={80} value={dataManagementForm.name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, name: event.target.value })} placeholder="e.g. Form 1" /></label><label className="form-field"><span>Section</span><input maxLength={40} value={dataManagementForm.section} onChange={(event) => setDataManagementForm({ ...dataManagementForm, section: event.target.value })} placeholder="Optional" /></label>
@@ -2595,7 +2698,7 @@ function App() {
               <label className="academic-year-active"><input type="checkbox" checked={dataManagementForm.is_active} onChange={(event) => setDataManagementForm({ ...dataManagementForm, is_active: event.target.checked })} /><span>Class is active</span></label>
               <label className="form-field"><span>Maximum optional subjects per student</span><input type="number" min={0} max={20} value={dataManagementForm.max_optional_subjects} onChange={(event) => setDataManagementForm({ ...dataManagementForm, max_optional_subjects: event.target.value })} /></label>
             </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Save class'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); }}>Cancel</button></div></form> : null}
-            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Class</th><th>Year</th><th>Optional limit</th><th>Class teacher</th><th>Status</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedClasses.map((schoolClass) => <tr key={schoolClass.id}><td>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</td><td>{schoolClass.academic_year.name}</td><td>{schoolClass.max_optional_subjects}</td><td>{schoolClass.teacher || 'Unassigned'}</td><td><span className={`account-status ${schoolClass.is_active ? 'active' : 'inactive'}`}>{schoolClass.is_active ? 'Active' : 'Inactive'}</span></td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(schoolClass)}>Edit</button></td> : null}</tr>)}{!managedClasses.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 6 : 5} className="empty-table">No classes found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading classes...</p> : null}
+            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Class</th><th>Year</th><th>Optional limit</th><th>Class teacher</th><th>Status</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{filteredManagedClasses.map((schoolClass) => <tr key={schoolClass.id}><td>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</td><td>{schoolClass.academic_year.name}</td><td>{schoolClass.max_optional_subjects}</td><td>{schoolClass.teacher || 'Unassigned'}</td><td><span className={`account-status ${schoolClass.is_active ? 'active' : 'inactive'}`}>{schoolClass.is_active ? 'Active' : 'Inactive'}</span></td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(schoolClass)}>Edit</button></td> : null}</tr>)}{!filteredManagedClasses.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 6 : 5} className="empty-table">No classes found for this academic year.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading classes...</p> : null}
           </section>
         ) : activeSection === 'Subjects' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
@@ -2611,7 +2714,8 @@ function App() {
               <label className="form-field"><span>Description</span><textarea rows={2} value={dataManagementForm.description} onChange={(event) => setDataManagementForm({ ...dataManagementForm, description: event.target.value })} /></label>
               <label className="academic-year-active"><input type="checkbox" checked={dataManagementForm.is_optional} onChange={(event) => setDataManagementForm({ ...dataManagementForm, is_optional: event.target.checked })} /><span>Optional subject (students must register)</span></label>
             </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Save subject'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); }}>Cancel</button></div></form> : null}
-            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Code</th><th>Subject</th><th>Type</th><th>Class</th><th>Teacher</th><th>Description</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedSubjects.map((subject) => <tr key={subject.id}><td>{subject.code}</td><td>{subject.name}</td><td>{subject.is_optional ? 'Optional' : 'Compulsory'}</td><td>{subject.school_class.name} · {subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Unassigned'}</td><td>{subject.description || '—'}</td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(subject)}>Edit</button></td> : null}</tr>)}{!managedSubjects.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 7 : 6} className="empty-table">No subjects found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading subjects...</p> : null}
+            <label className="form-field student-search"><span>Filter subjects by class</span><select value={subjectClassFilter} onChange={(event) => setSubjectClassFilter(event.target.value)}><option value="">All classes</option>{managedClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''} · {schoolClass.academic_year.name}</option>)}</select></label>
+            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Code</th><th>Subject</th><th>Type</th><th>Class</th><th>Teacher</th><th>Description</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{filteredManagedSubjects.map((subject) => <tr key={subject.id}><td>{subject.code}</td><td>{subject.name}</td><td>{subject.is_optional ? 'Optional' : 'Compulsory'}</td><td>{subject.school_class.name} · {subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Unassigned'}</td><td>{subject.description || '—'}</td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(subject)}>Edit</button></td> : null}</tr>)}{!filteredManagedSubjects.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 7 : 6} className="empty-table">No subjects found for this class.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading subjects...</p> : null}
           </section>
         ) : activeSection === 'Results' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER', 'TEACHER'].includes(user.role) ? (
           <section className="panel result-workspace">
@@ -2913,7 +3017,7 @@ function App() {
             <section className="panel table-panel">
               <div className="panel-header">
                 <div><span className="eyebrow">School records</span><h3>{selectedStudent ? selectedStudent.full_name : 'Students'}</h3></div>
-                {selectedStudent ? user.role !== 'STUDENT' ? <button className="ghost-btn" type="button" onClick={() => setSelectedStudent(null)}>Back to students</button> : null : isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('STUDENT'); setBulkImportError(''); setBulkImportNotice(''); setShowBulkEnrollForm(false); }}>Upload CSV</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkEnrollForm((v) => !v); setShowEnrollmentForm(false); setBulkEnrollError(''); setShowBulkImport(false); }}>Bulk enroll</button><button className="ghost-btn" type="button" onClick={() => { setEnrollmentForm(emptyEnrollmentForm); setEnrollmentError(''); setShowEnrollmentForm((shown) => !shown); setShowBulkEnrollForm(false); setShowBulkImport(false); }}>Enroll student</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add student</button></div> : null}
+                {selectedStudent ? user.role !== 'STUDENT' ? <button className="ghost-btn" type="button" onClick={() => setSelectedStudent(null)}>Back to students</button> : null : isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('STUDENT'); setBulkImportError(''); setBulkImportNotice(''); setShowBulkEnrollForm(false); setShowPromotionForm(false); }}>Upload CSV</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkEnrollForm((v) => !v); setShowEnrollmentForm(false); setBulkEnrollError(''); setShowBulkImport(false); setShowPromotionForm(false); }}>Bulk enroll</button><button className="ghost-btn" type="button" onClick={openPromotionForm}>Promote students</button><button className="ghost-btn" type="button" onClick={() => { setEnrollmentForm(emptyEnrollmentForm); setEnrollmentError(''); setShowEnrollmentForm((shown) => !shown); setShowBulkEnrollForm(false); setShowBulkImport(false); setShowPromotionForm(false); }}>Enroll student</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add student</button></div> : null}
               </div>
               {!selectedStudent ? (
                 <>
@@ -2921,6 +3025,31 @@ function App() {
                   {studentInitialCredentials ? <div className="import-preview"><strong>Save this student’s login details</strong><p>{studentInitialCredentials.full_name} · {studentInitialCredentials.admission_number}</p><p>Username: <code>{studentInitialCredentials.username}</code></p><p>Temporary password: <code>{studentInitialCredentials.temporary_password}</code></p><p className="empty-note">The student must change this password at first login. These details are shown only once.</p></div> : null}
                   {bulkEnrollNotice ? <p className="user-management-notice" role="status">{bulkEnrollNotice}</p> : null}
                   {bulkImportNotice && bulkImportRole === 'STUDENT' ? <><p className="user-management-notice" role="status">{bulkImportNotice}</p>{bulkActivationRecords.length ? <div className="import-preview"><strong>Save these temporary login details</strong><p className="empty-note">Give each student their username and temporary password. The system will require a password change at first login.</p><div className="table-scroll"><table><thead><tr><th>Admission number</th><th>Student</th><th>Username</th><th>Temporary password</th></tr></thead><tbody>{bulkActivationRecords.map((record) => <tr key={record.admission_number}><td>{record.admission_number}</td><td>{record.full_name}</td><td>{record.username}</td><td><code>{record.temporary_password}</code></td></tr>)}</tbody></table></div><button className="ghost-btn" type="button" onClick={() => { const rows = [['Admission number', 'Student', 'Username', 'Temporary password'], ...bulkActivationRecords.map((record) => [record.admission_number, record.full_name, record.username, record.temporary_password])]; const csv = rows.map((row) => row.map((value) => `"${value.replace(/"/g, '""')}"`).join(',')).join('\r\n'); const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'student-login-details.csv'; link.click(); URL.revokeObjectURL(url); }}>Download login details</button></div> : null}</> : null}
+                  {showPromotionForm ? <form className="academic-year-form enrollment-form" onSubmit={handlePromoteStudents}>
+                    <div className="user-form-heading"><span className="eyebrow">Academic year transition</span><h3>Promote students</h3></div>
+                    <p className="empty-note">Choose the completed year, class and term to preview published results. Select eligible students, then choose their destination year, class and term.</p>
+                    {promotionError ? <p className="dashboard-error" role="alert">{promotionError}</p> : null}
+                    {promotionNotice ? <p className="user-management-notice" role="status">{promotionNotice}</p> : null}
+                    <div className="user-form-heading"><h4>Students to promote from</h4></div>
+                    <div className="academic-year-grid">
+                      <label className="form-field"><span>Academic year</span><select required value={promotionSource.academic_year_id} onChange={(event) => { const yearId = event.target.value; const nextTerm = managedTerms.find((term) => String(term.academic_year.id) === yearId && term.is_active) || managedTerms.find((term) => String(term.academic_year.id) === yearId); setPromotionSource({ academic_year_id: yearId, term_id: nextTerm ? String(nextTerm.id) : '', school_class_id: '' }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source year</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                      <label className="form-field"><span>Source term</span><select required value={promotionSource.term_id} onChange={(event) => { setPromotionSource({ ...promotionSource, term_id: event.target.value }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source term</option>{managedTerms.filter((term) => String(term.academic_year.id) === promotionSource.academic_year_id).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
+                      <label className="form-field"><span>Source class</span><select required value={promotionSource.school_class_id} onChange={(event) => { setPromotionSource({ ...promotionSource, school_class_id: event.target.value }); setPromotionPreview(null); setPromotionStudentIds(new Set()); }}><option value="">Select source class</option>{managedClasses.filter((schoolClass) => String(schoolClass.academic_year.id) === promotionSource.academic_year_id).map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</option>)}</select></label>
+                      <label className="form-field"><span>Pass mark (%)</span><input type="number" min={0} max={100} step="0.01" value={promotionPassMark} onChange={(event) => { setPromotionPassMark(event.target.value); setPromotionPreview(null); setPromotionStudentIds(new Set()); }} /></label>
+                    </div>
+                    <div className="user-form-actions"><button className="ghost-btn" type="button" onClick={loadPromotionPreview} disabled={isLoadingPromotionPreview}>{isLoadingPromotionPreview ? 'Preparing preview...' : 'Preview eligible students'}</button></div>
+                    {promotionPreview ? <>
+                      <div className="import-preview"><strong>Promotion preview</strong><p>Students: {promotionPreview.summary.total} · Eligible: {promotionPreview.summary.eligible} · Not eligible: {promotionPreview.summary.not_eligible} · No published results: {promotionPreview.summary.no_results}</p><p>Pass mark: {promotionPreview.pass_mark}%</p></div>
+                      {promotionPreview.eligible.length ? <div className="table-scroll"><table className="data-management-table"><thead><tr><th><input type="checkbox" aria-label="Select all eligible students" checked={promotionStudentIds.size === promotionPreview.eligible.length && promotionPreview.eligible.length > 0} onChange={(event) => setPromotionStudentIds(event.target.checked ? new Set(promotionPreview.eligible.map((student) => student.id)) : new Set())} /></th><th>Admission no.</th><th>Student</th><th>Average</th></tr></thead><tbody>{promotionPreview.eligible.map((student) => <tr key={student.id}><td><input type="checkbox" checked={promotionStudentIds.has(student.id)} onChange={(event) => setPromotionStudentIds((previous) => { const next = new Set(previous); event.target.checked ? next.add(student.id) : next.delete(student.id); return next; })} /></td><td>{student.admission_number}</td><td>{student.name}</td><td>{student.average?.toFixed(2)}%</td></tr>)}</tbody></table></div> : <p className="empty-note">No students meet the selected pass mark.</p>}
+                    </> : null}
+                    <div className="user-form-heading"><h4>Promote selected students to</h4></div>
+                    <div className="academic-year-grid">
+                      <label className="form-field"><span>Academic year</span><select required value={promotionTarget.academic_year_id} onChange={(event) => setPromotionTarget({ academic_year_id: event.target.value, school_class_id: '', term_id: '' })}><option value="">Select target year</option>{managedAcademicYears.filter((year) => String(year.id) !== promotionSource.academic_year_id).map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                      <label className="form-field"><span>Target class</span><select required value={promotionTarget.school_class_id} onChange={(event) => setPromotionTarget({ ...promotionTarget, school_class_id: event.target.value })}><option value="">Select target class</option>{managedClasses.filter((schoolClass) => String(schoolClass.academic_year.id) === promotionTarget.academic_year_id).map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</option>)}</select></label>
+                      <label className="form-field"><span>Target term</span><select required value={promotionTarget.term_id} onChange={(event) => setPromotionTarget({ ...promotionTarget, term_id: event.target.value })}><option value="">Select target term</option>{managedTerms.filter((term) => String(term.academic_year.id) === promotionTarget.academic_year_id).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
+                    </div>
+                    <div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isPromotingStudents || !promotionPreview || !promotionStudentIds.size}>{isPromotingStudents ? 'Promoting...' : `Promote ${promotionStudentIds.size || ''} selected student(s)`}</button><button className="ghost-btn" type="button" onClick={() => { setShowPromotionForm(false); setPromotionError(''); }}>Close</button></div>
+                  </form> : null}
                   {showBulkImport && bulkImportRole === 'STUDENT' ? (
                     <form className="academic-year-form" onSubmit={handleBulkImport}>
                       <div className="user-form-heading"><span className="eyebrow">Student registration</span><h3>Upload student CSV</h3></div>
@@ -2974,6 +3103,7 @@ function App() {
                     </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Create student'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); setDataManagementError(''); }}>Cancel</button></div>
                   </form> : null}
                   {user.role === 'TEACHER' ? <p className="empty-note data-management-description">This directory shows students enrolled in classes you teach directly or through your assigned subjects. Open My Classes and select “View students” to filter by class.</p> : null}
+                  {isAdminWorkspace ? <label className="form-field student-search"><span>Filter students by class</span><select value={studentClassFilter} onChange={(event) => setStudentClassFilter(event.target.value)}><option value="">All students</option>{managedClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''} · {schoolClass.academic_year.name}</option>)}</select></label> : null}
                   <label className="form-field student-search"><span>Search students</span><input value={studentSearch} onChange={(event) => setStudentSearch(event.target.value)} placeholder="Name or admission number" /></label>
                   {isAdminWorkspace && (managedClasses.length === 0 || managedAcademicYears.length === 0 || managedTerms.length === 0) ? <p className="empty-note enrollment-prerequisite-note">Set up academic years, terms, and classes before enrolling students.</p> : null}
                   {isLoadingStudents ? <p className="empty-note">Loading students...</p> : null}
