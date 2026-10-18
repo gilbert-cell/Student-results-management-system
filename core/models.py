@@ -19,6 +19,7 @@ class User(AbstractUser):
         default=Role.STUDENT,
     )
     phone_number = models.CharField(max_length=20, blank=True, default='')
+    must_change_password = models.BooleanField(default=False)
     created_at = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
@@ -53,20 +54,46 @@ class Teacher(models.Model):
 
 
 class Student(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = 'ACTIVE', 'Active'
+        INACTIVE = 'INACTIVE', 'Inactive'
+        TRANSFERRED = 'TRANSFERRED', 'Transferred'
+        GRADUATED = 'GRADUATED', 'Graduated'
+        WITHDRAWN = 'WITHDRAWN', 'Withdrawn'
+        SUSPENDED = 'SUSPENDED', 'Suspended'
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='student_profile',
     )
     admission_number = models.CharField(max_length=20, unique=True)
+    middle_name = models.CharField(max_length=150, blank=True, default='')
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=20, blank=True, default='')
     parent_name = models.CharField(max_length=120, blank=True, default='')
+    parent_phone = models.CharField(max_length=20, blank=True, default='')
     current_class = models.CharField(max_length=80, blank=True, default='')
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
     created_at = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
         return f'{self.user.get_full_name() or self.user.username} ({self.admission_number})'
+
+
+class StudentActivation(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='student_activation')
+    code_hash = models.CharField(max_length=128)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f'Activation for {self.user.username}'
 
 
 class AcademicYear(models.Model):
@@ -113,6 +140,7 @@ class SchoolClass(models.Model):
         related_name='classes_assigned',
     )
     is_active = models.BooleanField(default=True)
+    max_optional_subjects = models.PositiveSmallIntegerField(default=2)
 
     class Meta:
         unique_together = ('name', 'section', 'academic_year')
@@ -139,6 +167,7 @@ class Subject(models.Model):
         related_name='subjects_taught',
     )
     description = models.TextField(blank=True, default='')
+    is_optional = models.BooleanField(default=False)
 
     def __str__(self):
         return f'{self.code} - {self.name}'
@@ -156,6 +185,20 @@ class Enrollment(models.Model):
 
     def __str__(self):
         return f'{self.student} -> {self.school_class}'
+
+
+class StudentSubjectRegistration(models.Model):
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='subject_registrations')
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='student_registrations')
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='subject_registrations')
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='subject_registrations')
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=('student', 'subject', 'academic_year', 'term'), name='unique_student_subject_registration')]
+
+    def __str__(self):
+        return f'{self.student} registered for {self.subject} ({self.term})'
 
 
 class Result(models.Model):
@@ -273,6 +316,43 @@ class ResultApproval(models.Model):
 
     def __str__(self):
         return f'{self.result} - {self.decision}'
+
+
+class ResultCorrection(models.Model):
+    """Tracks a requested correction to a published result."""
+    class CorrectionStatus(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        APPROVED = 'APPROVED', 'Approved'
+        REJECTED = 'REJECTED', 'Rejected'
+
+    result = models.ForeignKey(Result, on_delete=models.CASCADE, related_name='corrections')
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='correction_requests',
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='correction_reviews',
+    )
+    old_marks = models.DecimalField(max_digits=5, decimal_places=2)
+    new_marks = models.DecimalField(max_digits=5, decimal_places=2)
+    reason = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=CorrectionStatus.choices,
+        default=CorrectionStatus.PENDING,
+    )
+    review_comment = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(default=timezone.now)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f'Correction for {self.result} ({self.old_marks} → {self.new_marks})'
 
 
 class AuditLog(models.Model):

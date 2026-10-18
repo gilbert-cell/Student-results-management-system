@@ -1,6 +1,10 @@
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from django.db import transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_date
+from datetime import datetime
+from .student_accounts import create_student_user
 
 from .models import (
     AcademicYear,
@@ -9,8 +13,10 @@ from .models import (
     Enrollment,
     Result,
     ResultApproval,
+    ResultCorrection,
     SchoolClass,
     Student,
+    StudentSubjectRegistration,
     Subject,
     Teacher,
     Term,
@@ -21,7 +27,7 @@ from .models import (
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'username', 'first_name', 'last_name', 'email', 'role', 'phone_number')
+        fields = ('id', 'username', 'first_name', 'last_name', 'email', 'role', 'phone_number', 'is_active')
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
@@ -102,6 +108,7 @@ class UserManagementSerializer(serializers.ModelSerializer):
 class StudentSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     full_name = serializers.SerializerMethodField()
+    account_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Student
@@ -109,16 +116,27 @@ class StudentSerializer(serializers.ModelSerializer):
             'id',
             'user',
             'full_name',
+            'account_status',
             'admission_number',
+            'middle_name',
             'date_of_birth',
             'gender',
             'parent_name',
+            'parent_phone',
             'current_class',
+            'status',
             'created_at',
         )
 
     def get_full_name(self, obj):
-        return obj.user.get_full_name() or obj.user.username
+        return ' '.join(value for value in (obj.user.first_name, obj.middle_name, obj.user.last_name) if value) or obj.user.username
+
+    def get_account_status(self, obj):
+        if not obj.user.is_active:
+            return 'PENDING_ACTIVATION' if hasattr(obj.user, 'student_activation') else 'INACTIVE'
+        if obj.user.must_change_password:
+            return 'PASSWORD_CHANGE_REQUIRED'
+        return 'ACTIVE'
 
 
 class StudentRosterSerializer(serializers.ModelSerializer):
@@ -129,38 +147,57 @@ class StudentRosterSerializer(serializers.ModelSerializer):
         fields = ('id', 'full_name', 'admission_number', 'current_class')
 
     def get_full_name(self, obj):
-        return obj.user.get_full_name() or obj.user.username
+        return ' '.join(value for value in (obj.user.first_name, obj.middle_name, obj.user.last_name) if value) or obj.user.username
 
 
 class StudentCreateSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(max_length=150, write_only=True, validators=[UniqueValidator(queryset=User.objects.all())])
-    password = serializers.CharField(write_only=True, min_length=8)
     first_name = serializers.CharField(max_length=150, write_only=True)
     last_name = serializers.CharField(max_length=150, write_only=True)
     email = serializers.EmailField(required=False, allow_blank=True, write_only=True)
     phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True, write_only=True)
+    admission_number = serializers.CharField(
+        max_length=20,
+        required=False,
+        allow_blank=True,
+        validators=[UniqueValidator(queryset=Student.objects.all())],
+    )
 
     class Meta:
         model = Student
         fields = (
-            'username', 'password', 'first_name', 'last_name', 'email', 'phone_number',
-            'admission_number', 'date_of_birth', 'gender', 'parent_name', 'current_class',
+            'first_name', 'last_name', 'email', 'phone_number',
+            'admission_number', 'middle_name', 'date_of_birth', 'gender', 'parent_name', 'current_class',
         )
 
     @transaction.atomic
     def create(self, validated_data):
-        user_fields = {
-            key: validated_data.pop(key)
-            for key in ('username', 'password', 'first_name', 'last_name', 'email', 'phone_number')
-            if key in validated_data
-        }
-        password = user_fields.pop('password')
-        user = User.objects.create_user(
-            password=password,
-            role=User.Role.STUDENT,
-            **user_fields,
+        first_name = validated_data.pop('first_name')
+        last_name = validated_data.pop('last_name')
+        email = validated_data.pop('email', '')
+        phone_number = validated_data.pop('phone_number', '')
+        user, credentials = create_student_user(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            phone_number=phone_number,
         )
-        return Student.objects.create(user=user, **validated_data)
+        if not validated_data.get('admission_number'):
+            validated_data['admission_number'] = generate_admission_number()
+        student = Student.objects.create(user=user, **validated_data)
+        student.initial_credentials = credentials
+        return student
+
+
+def generate_admission_number():
+    """Return the next school generated student ID for this calendar year."""
+    prefix = f'STU-{timezone.now().year}-'
+    existing = Student.objects.filter(admission_number__startswith=prefix).values_list('admission_number', flat=True)
+    sequence = max((int(value[len(prefix):]) for value in existing if value[len(prefix):].isdigit()), default=0) + 1
+    candidate = f'{prefix}{sequence:04d}'
+    while Student.objects.filter(admission_number=candidate).exists():
+        sequence += 1
+        candidate = f'{prefix}{sequence:04d}'
+    return candidate
 
 
 class StudentProfileManagementSerializer(serializers.ModelSerializer):
@@ -171,7 +208,7 @@ class StudentProfileManagementSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Student
-        fields = ('first_name', 'last_name', 'email', 'phone_number', 'admission_number', 'date_of_birth', 'gender', 'parent_name', 'current_class')
+        fields = ('first_name', 'last_name', 'email', 'phone_number', 'admission_number', 'middle_name', 'date_of_birth', 'gender', 'parent_name', 'parent_phone', 'current_class', 'status')
 
     def update(self, instance, validated_data):
         user_fields = validated_data.pop('user', {})
@@ -334,7 +371,7 @@ class SchoolClassSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SchoolClass
-        fields = ('id', 'name', 'section', 'academic_year', 'teacher', 'teacher_id', 'is_active')
+        fields = ('id', 'name', 'section', 'academic_year', 'teacher', 'teacher_id', 'is_active', 'max_optional_subjects')
 
     def get_teacher(self, obj):
         if not obj.teacher:
@@ -350,7 +387,12 @@ class SchoolClassWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SchoolClass
-        fields = ('name', 'section', 'academic_year_id', 'teacher_id', 'is_active')
+        fields = ('name', 'section', 'academic_year_id', 'teacher_id', 'is_active', 'max_optional_subjects')
+
+    def validate_max_optional_subjects(self, value):
+        if value > 20:
+            raise serializers.ValidationError('The optional subject limit cannot exceed 20.')
+        return value
 
 
 class SubjectSerializer(serializers.ModelSerializer):
@@ -360,7 +402,7 @@ class SubjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Subject
-        fields = ('id', 'code', 'name', 'school_class', 'teacher', 'teacher_id', 'description')
+        fields = ('id', 'code', 'name', 'school_class', 'teacher', 'teacher_id', 'description', 'is_optional')
 
     def get_teacher(self, obj):
         if not obj.teacher:
@@ -376,7 +418,7 @@ class SubjectWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Subject
-        fields = ('code', 'name', 'school_class_id', 'teacher_id', 'description')
+        fields = ('code', 'name', 'school_class_id', 'teacher_id', 'description', 'is_optional')
 
 
 class EnrollmentSerializer(serializers.ModelSerializer):
@@ -516,6 +558,10 @@ class ResultWriteSerializer(serializers.ModelSerializer):
             term=term,
         ).exists():
             raise serializers.ValidationError({'student_id': 'The student is not enrolled in this subject class for the selected term.'})
+        if student and subject and subject.is_optional and not StudentSubjectRegistration.objects.filter(
+            student=student, subject=subject, academic_year=academic_year, term=term,
+        ).exists():
+            raise serializers.ValidationError({'subject_id': 'The student has not registered for this optional subject.'})
         status_value = attrs.get('status')
         if status_value not in (None, Result.ResultStatus.DRAFT, Result.ResultStatus.SUBMITTED):
             raise serializers.ValidationError({'status': 'Results must be submitted for review before they can be approved or returned.'})
@@ -559,6 +605,10 @@ class BulkResultWriteSerializer(serializers.Serializer):
                 academic_year=academic_year, term=term,
             ).exists():
                 raise serializers.ValidationError({'rows': f'{student} is not enrolled in this class for the selected term.'})
+            if subject.is_optional and not StudentSubjectRegistration.objects.filter(
+                student=student, subject=subject, academic_year=academic_year, term=term,
+            ).exists():
+                raise serializers.ValidationError({'rows': f'{student} has not registered for optional subject {subject.name}.'})
             cleaned.append({'student': student, 'marks': marks, 'remarks': str(row.get('remarks', ''))})
         if not cleaned:
             raise serializers.ValidationError({'rows': 'Enter marks for at least one student.'})
@@ -605,28 +655,33 @@ class BulkUserImportSerializer(serializers.Serializer):
     def validate(self, attrs):
         cleaned = []
         errors = []
+        seen_usernames = set()
+        seen_student_ids = set()
         for i, row in enumerate(attrs['rows']):
-            username = str(row.get('username', '')).strip()
-            password = str(row.get('password', '')).strip()
             first_name = str(row.get('first_name', '')).strip()
             last_name = str(row.get('last_name', '')).strip()
-            if not username:
-                errors.append(f'Row {i+1}: username is required.')
-                continue
-            if not password or len(password) < 8:
-                errors.append(f'Row {i+1}: password must be at least 8 characters.')
-                continue
-            if User.objects.filter(username=username).exists():
-                errors.append(f'Row {i+1}: username "{username}" already exists.')
-                continue
-            entry = {'username': username, 'password': password, 'first_name': first_name, 'last_name': last_name,
-                     'email': str(row.get('email', '')).strip()}
+            email = str(row.get('email', '')).strip()
             if attrs['role'] == 'STUDENT':
-                admission = str(row.get('admission_number', '')).strip()
-                if not admission:
-                    errors.append(f'Row {i+1}: admission_number is required for students.')
+                username = str(row.get('username', '')).strip()
+                password = str(row.get('password', '')).strip()
+                if not username:
+                    errors.append(f'Row {i+1}: username is required.')
                     continue
-                entry['admission_number'] = admission
+                if not password or len(password) < 8:
+                    errors.append(f'Row {i+1}: password must be at least 8 characters.')
+                    continue
+                if username in seen_usernames or User.objects.filter(username=username).exists():
+                    errors.append(f'Row {i+1}: username "{username}" already exists.')
+                    continue
+                seen_usernames.add(username)
+                entry = {'username': username, 'password': password, 'first_name': first_name, 'last_name': last_name, 'email': email}
+                admission = str(row.get('admission_number', '')).strip()
+                if admission and (admission in seen_student_ids or Student.objects.filter(admission_number=admission).exists()):
+                    errors.append(f'Row {i+1}: admission number "{admission}" already exists.')
+                    continue
+                if admission:
+                    seen_student_ids.add(admission)
+                    entry['admission_number'] = admission
                 entry['gender'] = str(row.get('gender', '')).strip()
                 entry['parent_name'] = str(row.get('parent_name', '')).strip()
             else:
@@ -634,15 +689,121 @@ class BulkUserImportSerializer(serializers.Serializer):
                 if not emp_id:
                     errors.append(f'Row {i+1}: employee_id is required for teachers.')
                     continue
+                username = emp_id
+                if username in seen_usernames or User.objects.filter(username=username).exists() or Teacher.objects.filter(employee_id=emp_id).exists():
+                    errors.append(f'Row {i+1}: employee_id "{emp_id}" already exists.')
+                    continue
+                seen_usernames.add(username)
+                entry = {'username': username, 'first_name': first_name, 'last_name': last_name, 'email': email}
                 entry['employee_id'] = emp_id
                 entry['department'] = str(row.get('department', '')).strip()
                 entry['qualification'] = str(row.get('qualification', '')).strip()
             cleaned.append(entry)
-        if errors:
-            raise serializers.ValidationError({'rows': errors})
         if not cleaned:
-            raise serializers.ValidationError({'rows': 'No valid rows to import.'})
+            raise serializers.ValidationError({'rows': errors or ['No valid rows to import.']})
         attrs['cleaned_rows'] = cleaned
+        attrs['row_errors'] = errors
+        return attrs
+
+
+class StudentRegistrationImportSerializer(serializers.Serializer):
+    rows = serializers.ListField(child=serializers.DictField(), min_length=1, max_length=5000)
+    academic_year_id = serializers.IntegerField(required=False)
+    term_id = serializers.IntegerField(required=False)
+
+    def validate(self, attrs):
+        valid_rows = []
+        row_errors = []
+        duplicates = []
+        seen_admissions = set()
+        active_year = AcademicYear.objects.filter(is_active=True).order_by('-start_date').first()
+        selected_year_id = attrs.get('academic_year_id', getattr(active_year, 'pk', None))
+        import_year = AcademicYear.objects.filter(pk=selected_year_id).first() if selected_year_id else None
+        if not import_year:
+            raise serializers.ValidationError({'academic_year_id': 'Select a valid academic year.'})
+        import_term = None
+        if attrs.get('term_id'):
+            import_term = Term.objects.filter(pk=attrs['term_id'], academic_year=import_year).first()
+            if not import_term:
+                raise serializers.ValidationError({'term_id': 'Select a term in the chosen academic year.'})
+        else:
+            import_term = Term.objects.filter(is_active=True, academic_year=import_year).select_related('academic_year').first()
+        attrs['import_year'] = import_year
+        attrs['import_term'] = import_term
+        classes = list(SchoolClass.objects.filter(academic_year=import_year, is_active=True))
+        aliases = {
+            'admission_no': 'admission_number', 'student_id': 'admission_number',
+            'first_name': 'first_name', 'middle_name': 'middle_name', 'last_name': 'last_name',
+            'date_of_birth': 'date_of_birth', 'dob': 'date_of_birth', 'parent_phone': 'parent_phone',
+            'phone': 'parent_phone', 'class': 'class_name', 'form_class': 'class_name',
+        }
+        for index, source in enumerate(attrs['rows'], start=2):
+            row = {}
+            for key, value in source.items():
+                normalized = str(key).strip().lower().replace(' ', '_').replace('-', '_')
+                row[aliases.get(normalized, normalized)] = str(value).strip() if value is not None else ''
+            errors = []
+            if not row.get('first_name'):
+                errors.append('missing first_name')
+            if not row.get('last_name'):
+                errors.append('missing last_name')
+            admission = row.get('admission_number', '')
+            if len(admission) > 20:
+                errors.append('admission_number cannot exceed 20 characters')
+            if admission and (admission in seen_admissions or Student.objects.filter(admission_number=admission).exists()):
+                duplicates.append(f'Row {index}: admission number {admission} already exists.')
+                continue
+            if admission:
+                seen_admissions.add(admission)
+            gender = row.get('gender', '').strip().title()
+            if gender and gender not in ('Female', 'Male'):
+                errors.append('invalid gender (use Female or Male)')
+            birth_date = row.get('date_of_birth', '')
+            parsed_birth_date = parse_date(birth_date) if birth_date else None
+            if birth_date and not parsed_birth_date:
+                for date_format in ('%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y', '%m-%d-%Y'):
+                    try:
+                        parsed_birth_date = datetime.strptime(birth_date, date_format).date()
+                        break
+                    except ValueError:
+                        continue
+            email = row.get('email', '').strip()
+            if email:
+                try:
+                    serializers.EmailField().run_validation(email)
+                except serializers.ValidationError:
+                    errors.append('invalid email')
+            for field, maximum in (('first_name', 150), ('middle_name', 150), ('last_name', 150), ('parent_name', 120), ('parent_phone', 20)):
+                if len(row.get(field, '')) > maximum:
+                    errors.append(f'{field} cannot exceed {maximum} characters')
+            class_name = row.get('class_name', '').strip()
+            form_name = row.get('form', '').strip()
+            school_class = None
+            if class_name:
+                school_class = next((item for item in classes if str(item).casefold() == class_name.casefold()), None)
+                if school_class is None:
+                    errors.append(f'class "{class_name}" not found in academic year {import_year.name}')
+                elif import_term is None or import_term.academic_year_id != school_class.academic_year_id:
+                    errors.append('select a term for the chosen class academic year')
+            if len(class_name or form_name) > 80:
+                errors.append('class_name cannot exceed 80 characters')
+            if errors:
+                row_errors.append(f'Row {index}: {", ".join(errors)}.')
+                continue
+            valid_rows.append({
+                'admission_number': admission,
+                'first_name': row['first_name'],
+                'middle_name': row.get('middle_name', ''),
+                'last_name': row['last_name'],
+                'gender': gender,
+                'date_of_birth': parsed_birth_date,
+                'parent_name': row.get('parent_name', ''),
+                'parent_phone': row.get('parent_phone', ''),
+                'email': email,
+                'current_class': str(school_class) if school_class else class_name or form_name,
+                'school_class': school_class,
+            })
+        attrs.update(valid_rows=valid_rows, row_errors=row_errors, duplicates=duplicates)
         return attrs
 
 
@@ -659,3 +820,58 @@ class ResultReviewSerializer(serializers.Serializer):
         if attrs['status'] == Result.ResultStatus.RETURNED and not attrs.get('comments', '').strip():
             raise serializers.ValidationError({'comments': 'Add a comment explaining what needs to be corrected.'})
         return attrs
+
+
+class ResultCorrectionSerializer(serializers.ModelSerializer):
+    requested_by_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+    result_subject = serializers.SerializerMethodField()
+    result_student = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ResultCorrection
+        fields = (
+            'id', 'result', 'result_subject', 'result_student',
+            'old_marks', 'new_marks', 'reason', 'status',
+            'review_comment', 'requested_by_name', 'reviewed_by_name',
+            'created_at', 'reviewed_at',
+        )
+        read_only_fields = ('id', 'old_marks', 'status', 'reviewed_by_name', 'reviewed_at', 'created_at')
+
+    def get_requested_by_name(self, obj):
+        if not obj.requested_by:
+            return ''
+        return obj.requested_by.get_full_name() or obj.requested_by.username
+
+    def get_reviewed_by_name(self, obj):
+        if not obj.reviewed_by:
+            return ''
+        return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
+
+    def get_result_subject(self, obj):
+        return obj.result.subject.name
+
+    def get_result_student(self, obj):
+        return obj.result.student.user.get_full_name() or obj.result.student.admission_number
+
+
+class ResultCorrectionRequestSerializer(serializers.Serializer):
+    new_marks = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=0, max_value=100)
+    reason = serializers.CharField(min_length=10, max_length=2000)
+
+
+class ResultCorrectionReviewSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=('approve', 'reject'))
+    review_comment = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+    def validate(self, attrs):
+        if attrs['action'] == 'reject' and not attrs.get('review_comment', '').strip():
+            raise serializers.ValidationError({'review_comment': 'A comment is required when rejecting a correction.'})
+        return attrs
+
+
+class PromotionPreviewSerializer(serializers.Serializer):
+    source_class_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
+    academic_year_id = serializers.PrimaryKeyRelatedField(source='academic_year', queryset=AcademicYear.objects.all())
+    term_id = serializers.PrimaryKeyRelatedField(source='term', queryset=Term.objects.all())
+    pass_mark = serializers.DecimalField(max_digits=5, decimal_places=2, default=50, min_value=0, max_value=100)

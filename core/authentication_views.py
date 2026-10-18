@@ -26,6 +26,7 @@ def user_payload(user):
         'username': user.get_username(),
         'name': user.get_full_name() or user.get_username(),
         'role': user.role,
+        'must_change_password': user.must_change_password,
     }
 
 
@@ -45,7 +46,7 @@ def login_view(request):
     if not isinstance(payload, dict):
         return JsonResponse({'detail': 'Invalid login request.'}, status=400)
 
-    username = payload.get('username')
+    username = payload.get('username').strip() if isinstance(payload.get('username'), str) else payload.get('username')
     password = payload.get('password')
     if not all(isinstance(value, str) and value for value in (username, password)):
         return JsonResponse({'detail': 'Username and password are required.'}, status=400)
@@ -166,12 +167,15 @@ def change_password(request):
         return JsonResponse({'detail': 'Current and new passwords are required.'}, status=400)
     if not request.user.check_password(current_password):
         return JsonResponse({'detail': 'Current password is incorrect.'}, status=400)
+    if current_password == new_password:
+        return JsonResponse({'detail': 'Choose a password different from your temporary password.'}, status=400)
     try:
         validate_password(new_password, user=request.user)
     except ValidationError as error:
         return JsonResponse({'detail': ' '.join(error.messages)}, status=400)
 
     request.user.set_password(new_password)
-    request.user.save(update_fields=['password'])
+    request.user.must_change_password = False
+    request.user.save(update_fields=['password', 'must_change_password'])
     update_session_auth_hash(request, request.user)
     return JsonResponse({'detail': 'Password updated successfully.'})

@@ -1171,6 +1171,16 @@ tbody tr:hover { background: #f8faff; }
   background: #f8fafc;
 }
 
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: #f8fafc;
+}
+
+.auth-shell .login-card { width: min(100%, 520px); }
+
 .login-card {
   width: min(100%, 520px);
   padding: 44px 42px;
@@ -1445,6 +1455,9 @@ tbody tr:hover { background: #f8faff; }
 }
 .student-workspace-card > h2 { margin: 4px 0 16px; font-size: 1.4rem; }
 .student-performance-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 10px 0 16px; }
+.student-performance-stats .stat-card strong { font-size: 1.6rem; }
+.student-performance-stats .stat-card strong.student-performance-percentage { font-size: 1.35rem; }
+.data-management-table td.student-performance-percentage { font-size: .9rem; }
 .performance-filters { justify-content: flex-end; margin-bottom: 12px; }
 
 .profile-facts {
@@ -1740,6 +1753,7 @@ tbody tr:hover { background: #f8faff; }
   .user-form-actions { flex-wrap: wrap; }
   .result-slip-actions { flex-wrap: wrap; gap: 8px; }
   .student-performance-stats { grid-template-columns: 1fr !important; }
+  .student-performance-stats .stat-card strong { font-size: 1.35rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

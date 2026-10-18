@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Avg, Count, Q
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -15,8 +16,10 @@ from .models import (
     Enrollment,
     Result,
     ResultApproval,
+    ResultCorrection,
     SchoolClass,
     Student,
+    StudentSubjectRegistration,
     Subject,
     Teacher,
     Term,
@@ -34,6 +37,7 @@ from .permissions import (
     IsReviewer,
 )
 from .grading import assessment_average
+from .student_accounts import create_student_user, issue_student_credentials
 
 ADMIN_ROLES = (User.Role.SUPER_ADMIN, User.Role.ADMIN)
 from .serializers import (
@@ -44,10 +48,16 @@ from .serializers import (
     BulkEnrollmentSerializer,
     BulkResultWriteSerializer,
     BulkUserImportSerializer,
+    StudentRegistrationImportSerializer,
+    generate_admission_number,
     EnrollmentWriteSerializer,
     EnrollmentSerializer,
     ResultSerializer,
+    ResultCorrectionRequestSerializer,
+    ResultCorrectionReviewSerializer,
+    ResultCorrectionSerializer,
     ResultReviewSerializer,
+    PromotionPreviewSerializer,
     ResultWriteSerializer,
     StudentCreateSerializer,
     StudentProfileManagementSerializer,
@@ -355,7 +365,7 @@ def manage_term(request, term_id):
 @permission_classes([IsAnySystemRole])
 def students(request):
     if request.method == 'GET':
-        students = Student.objects.select_related('user').all().order_by('admission_number')
+        students = Student.objects.select_related('user', 'user__student_activation').all().order_by('admission_number')
         if request.user.role == User.Role.TEACHER:
             students = students.filter(
                 Q(enrollments__school_class__teacher__user=request.user)
@@ -392,7 +402,9 @@ def students(request):
                 model_name='Student',
                 description=f'Created student {student.admission_number} ({student.pk}).',
             )
-        return Response(StudentSerializer(student).data, status=status.HTTP_201_CREATED)
+        payload = StudentSerializer(student).data
+        payload['initial_credentials'] = getattr(student, 'initial_credentials', None)
+        return Response(payload, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -415,6 +427,20 @@ def manage_student(request, student_id):
             )
         return Response(StudentSerializer(student).data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdmin])
+def reset_student_login(request, student_id):
+    student = get_object_or_404(Student.objects.select_related('user'), pk=student_id)
+    credentials = issue_student_credentials(student.user)
+    AuditLog.objects.create(
+        actor=request.user,
+        action='UPDATE',
+        model_name='Student',
+        description=f'Reissued first-login credentials for student {student.admission_number} ({student.pk}).',
+    )
+    return Response({'admission_number': student.admission_number, 'full_name': student.user.get_full_name(), **credentials})
 
 
 @api_view(['GET', 'POST'])
@@ -521,7 +547,9 @@ def subjects(request):
         if request.user.role == User.Role.TEACHER:
             subjects = subjects.filter(teacher__user=request.user)
         elif request.user.role == User.Role.STUDENT:
-            subjects = subjects.filter(school_class__enrollments__student__user=request.user).distinct()
+            subjects = subjects.filter(school_class__enrollments__student__user=request.user).filter(
+                Q(is_optional=False) | Q(student_registrations__student__user=request.user),
+            ).distinct()
         return Response(SubjectSerializer(subjects, many=True).data)
 
     if request.user.role not in ADMIN_ROLES:
@@ -539,6 +567,88 @@ def subjects(request):
             )
         return Response(SubjectSerializer(subject).data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAnySystemRole])
+def subject_registrations(request):
+    if request.user.role != User.Role.STUDENT:
+        return Response({'detail': 'Subject registration is available to students only.'}, status=status.HTTP_403_FORBIDDEN)
+    student = get_object_or_404(Student, user=request.user)
+    if request.method == 'GET':
+        enrollments = Enrollment.objects.filter(student=student).select_related(
+            'school_class', 'academic_year', 'term',
+        ).order_by('-academic_year__start_date', 'term__start_date')
+        year_id = request.query_params.get('academic_year_id')
+        term_id = request.query_params.get('term_id')
+        if year_id and year_id.isdecimal():
+            enrollments = enrollments.filter(academic_year_id=int(year_id))
+        if term_id and term_id.isdecimal():
+            enrollments = enrollments.filter(term_id=int(term_id))
+        data = []
+        for enrollment in enrollments:
+            registered_ids = set(StudentSubjectRegistration.objects.filter(
+                student=student, academic_year=enrollment.academic_year, term=enrollment.term,
+                subject__school_class=enrollment.school_class,
+            ).values_list('subject_id', flat=True))
+            items = Subject.objects.filter(school_class=enrollment.school_class).select_related(
+                'teacher__user', 'school_class__academic_year',
+            ).order_by('code')
+            subjects_data = SubjectSerializer(items, many=True).data
+            for item in subjects_data:
+                item['is_registered'] = item['id'] in registered_ids or not item['is_optional']
+            data.append({
+                'school_class': SchoolClassSerializer(enrollment.school_class).data,
+                'academic_year': AcademicYearSerializer(enrollment.academic_year).data,
+                'term': {'id': enrollment.term_id, 'name': enrollment.term.name},
+                'max_optional_subjects': enrollment.school_class.max_optional_subjects,
+                'subjects': subjects_data,
+            })
+        return Response(data)
+
+    school_class_id = request.data.get('school_class_id')
+    term_id = request.data.get('term_id')
+    subject_ids = request.data.get('subject_ids')
+    if not str(school_class_id or '').isdecimal() or not str(term_id or '').isdecimal() or not isinstance(subject_ids, list):
+        return Response({'detail': 'Provide school_class_id, term_id, and a list of subject_ids.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        enrollment = Enrollment.objects.select_related('school_class', 'academic_year', 'term').get(
+            student=student, school_class_id=int(school_class_id), term_id=int(term_id),
+        )
+    except Enrollment.DoesNotExist:
+        return Response({'detail': 'You are not enrolled in this class and term.'}, status=status.HTTP_400_BAD_REQUEST)
+    if enrollment.term.academic_year_id != enrollment.academic_year_id or enrollment.school_class.academic_year_id != enrollment.academic_year_id:
+        return Response({'detail': 'The enrollment has an inconsistent academic year and term.'}, status=status.HTTP_400_BAD_REQUEST)
+    if any(not str(item).isdecimal() for item in subject_ids) or len(set(map(str, subject_ids))) != len(subject_ids):
+        return Response({'detail': 'Subject IDs must be unique positive integers.'}, status=status.HTTP_400_BAD_REQUEST)
+    optional_subjects = Subject.objects.filter(
+        school_class=enrollment.school_class, is_optional=True,
+    )
+    selected_ids = set(map(int, subject_ids))
+    if selected_ids - set(optional_subjects.values_list('id', flat=True)):
+        return Response({'detail': 'Only optional subjects assigned to your enrolled class may be selected.'}, status=status.HTTP_400_BAD_REQUEST)
+    if len(selected_ids) > enrollment.school_class.max_optional_subjects:
+        return Response({'detail': f'You may select up to {enrollment.school_class.max_optional_subjects} optional subjects.'}, status=status.HTTP_400_BAD_REQUEST)
+    current = set(StudentSubjectRegistration.objects.filter(
+        student=student, academic_year=enrollment.academic_year, term=enrollment.term,
+        subject__school_class=enrollment.school_class,
+    ).values_list('subject_id', flat=True))
+    if current - selected_ids and Result.objects.filter(
+        student=student, subject_id__in=current - selected_ids,
+        academic_year=enrollment.academic_year, term=enrollment.term,
+    ).exists():
+        return Response({'detail': 'Selections cannot be changed after marks have been recorded for those subjects.'}, status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        StudentSubjectRegistration.objects.filter(
+            student=student, academic_year=enrollment.academic_year, term=enrollment.term,
+            subject__school_class=enrollment.school_class,
+        ).exclude(subject_id__in=selected_ids).delete()
+        for subject_id in selected_ids:
+            StudentSubjectRegistration.objects.get_or_create(
+                student=student, subject_id=subject_id,
+                academic_year=enrollment.academic_year, term=enrollment.term,
+            )
+    return Response({'detail': 'Optional subject selection saved.', 'selected_subject_ids': sorted(selected_ids)})
 
 
 @api_view(['PATCH'])
@@ -1202,6 +1312,85 @@ def bulk_enroll_students(request):
 
 @api_view(['POST'])
 @permission_classes([IsAdmin])
+def preview_student_import(request):
+    serializer = StudentRegistrationImportSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    data = serializer.validated_data
+    return Response({
+        'total': len(data['rows']),
+        'valid': len(data['valid_rows']),
+        'duplicates': data['duplicates'],
+        'errors': data['row_errors'],
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdmin])
+def import_students(request):
+    serializer = StudentRegistrationImportSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    data = serializer.validated_data
+    created = 0
+    credentials = []
+    with transaction.atomic():
+        admission_prefix = f'STU-{timezone.now().year}-'
+        first_available = generate_admission_number()
+        next_admission_sequence = int(first_available[len(admission_prefix):])
+        reserved_admissions = {row['admission_number'] for row in data['valid_rows'] if row['admission_number']}
+        active_term = data['import_term']
+        for row in data['valid_rows']:
+            admission = row['admission_number']
+            if not admission:
+                admission = f'{admission_prefix}{next_admission_sequence:04d}'
+                while admission in reserved_admissions:
+                    next_admission_sequence += 1
+                    admission = f'{admission_prefix}{next_admission_sequence:04d}'
+                reserved_admissions.add(admission)
+                next_admission_sequence += 1
+            user, login_details = create_student_user(
+                first_name=row['first_name'],
+                last_name=row['last_name'],
+                email=row['email'],
+            )
+            student = Student.objects.create(
+                user=user,
+                admission_number=admission,
+                middle_name=row['middle_name'],
+                date_of_birth=row['date_of_birth'],
+                gender=row['gender'],
+                parent_name=row['parent_name'],
+                parent_phone=row['parent_phone'],
+                current_class=row['current_class'],
+            )
+            if row['school_class'] and active_term:
+                Enrollment.objects.get_or_create(
+                    student=student,
+                    school_class=row['school_class'],
+                    academic_year=row['school_class'].academic_year,
+                    term=active_term,
+                )
+            credentials.append({'admission_number': admission, 'full_name': student.user.get_full_name(), **login_details})
+            created += 1
+        if created:
+            AuditLog.objects.create(
+                actor=request.user,
+                action='CREATE',
+                model_name='Student',
+                description=f'CSV registration: {created} students created with temporary passwords requiring first-login change.',
+            )
+    return Response({
+        'created': created,
+        'skipped': len(data['duplicates']) + len(data['row_errors']),
+        'duplicates': data['duplicates'],
+        'errors': data['row_errors'],
+        'credentials': credentials,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdmin])
 def bulk_import_users(request):
     """Create multiple student or teacher accounts from a parsed CSV payload."""
     serializer = BulkUserImportSerializer(data=request.data)
@@ -1209,18 +1398,20 @@ def bulk_import_users(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     role = serializer.validated_data['role']
+    if role == 'STUDENT':
+        return Response({'detail': 'Use student registration import; student CSV files must not contain usernames or passwords.'}, status=status.HTTP_400_BAD_REQUEST)
     rows = serializer.validated_data['cleaned_rows']
     created = 0
     with transaction.atomic():
         for row in rows:
             user = User.objects.create_user(
-                username=row['username'], password=row['password'],
+                username=row['username'], password=row.get('password'),
                 first_name=row['first_name'], last_name=row['last_name'],
                 email=row['email'], role=role,
             )
             if role == 'STUDENT':
                 Student.objects.create(
-                    user=user, admission_number=row['admission_number'],
+                    user=user, admission_number=row.get('admission_number') or generate_admission_number(),
                     gender=row.get('gender', ''), parent_name=row.get('parent_name', ''),
                 )
             else:
@@ -1233,7 +1424,11 @@ def bulk_import_users(request):
             actor=request.user, action='CREATE', model_name='User',
             description=f'Bulk import: {created} {role.lower()} accounts created.',
         )
-    return Response({'created': created}, status=status.HTTP_201_CREATED)
+    return Response({
+        'created': created,
+        'skipped': len(serializer.validated_data['row_errors']),
+        'errors': serializer.validated_data['row_errors'],
+    }, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])
@@ -1391,6 +1586,407 @@ def performance_summary(request):
     payload.sort(key=lambda item: item['average_marks'], reverse=True)
     payload = payload[:8]
     return Response({'subjects': payload})
+
+
+@api_view(['GET'])
+@permission_classes([IsAnySystemRole])
+def academic_history(request, student_id):
+    """Return all enrollments with published result summaries for a student."""
+    role = request.user.role
+    if role == User.Role.STUDENT:
+        student = Student.objects.filter(user=request.user, pk=student_id).first()
+        if student is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    elif role == User.Role.TEACHER:
+        student = Student.objects.filter(
+            pk=student_id,
+            enrollments__school_class__in=SchoolClass.objects.filter(
+                Q(teacher__user=request.user) | Q(subjects__teacher__user=request.user)
+            ),
+        ).distinct().first()
+        if student is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        student = get_object_or_404(Student, pk=student_id)
+
+    enrollments_qs = (
+        Enrollment.objects
+        .filter(student=student)
+        .select_related('school_class__teacher__user', 'academic_year', 'term')
+        .order_by('academic_year__start_date', 'term__start_date')
+    )
+
+    published_results = (
+        Result.objects
+        .filter(student=student, status=Result.ResultStatus.PUBLISHED)
+        .values('academic_year_id', 'term_id', 'subject_id', 'assessment_type', 'marks')
+    )
+    weight_rows = AssessmentWeight.objects.filter(
+        subject_id__in={r['subject_id'] for r in published_results},
+        academic_year_id__in={r['academic_year_id'] for r in published_results},
+        term_id__in={r['term_id'] for r in published_results},
+    ).values('subject_id', 'academic_year_id', 'term_id', 'assessment_type', 'weight')
+    weight_map = {}
+    for w in weight_rows:
+        weight_map.setdefault((w['subject_id'], w['academic_year_id'], w['term_id']), {})[w['assessment_type']] = float(w['weight'])
+
+    # Group assessments per (year, term, subject)
+    term_subject_assessments = {}
+    for r in published_results:
+        key = (r['academic_year_id'], r['term_id'])
+        subj_key = (r['subject_id'], r['academic_year_id'], r['term_id'])
+        term_subject_assessments.setdefault(key, {}).setdefault(subj_key, {}).setdefault(r['assessment_type'], []).append(float(r['marks']))
+
+    # Compute per-term summary
+    term_summaries = {}
+    for (year_id, term_id), subjects_data in term_subject_assessments.items():
+        subject_marks = []
+        for subj_key, assessments in subjects_data.items():
+            mark, _ = assessment_average(assessments, weight_map.get(subj_key, {}))
+            if mark is not None:
+                subject_marks.append(mark)
+        avg = round(sum(subject_marks) / len(subject_marks), 2) if subject_marks else None
+        term_summaries[(year_id, term_id)] = {
+            'average': avg,
+            'subjects_count': len(subjects_data),
+            'overall_grade': Result.calculate_grade(avg) if avg is not None else None,
+            'overall_status': ('Pass' if avg >= 50 else 'Fail') if avg is not None else None,
+        }
+
+    # Compute per-term class position
+    for (year_id, term_id), summary in term_summaries.items():
+        if summary['average'] is None:
+            summary['position'] = None
+            summary['class_size'] = None
+            continue
+        # Find the class this student was in for this term
+        enrollment_for_term = next(
+            (e for e in enrollments_qs if e.academic_year_id == year_id and e.term_id == term_id), None
+        )
+        if not enrollment_for_term:
+            summary['position'] = None
+            summary['class_size'] = None
+            continue
+        class_id = enrollment_for_term.school_class_id
+        peer_ids = set(
+            Student.objects.filter(
+                enrollments__school_class_id=class_id,
+                enrollments__academic_year_id=year_id,
+                enrollments__term_id=term_id,
+            ).distinct().values_list('pk', flat=True)
+        )
+        summary['class_size'] = len(peer_ids)
+        peer_results = (
+            Result.objects
+            .filter(
+                student_id__in=peer_ids,
+                subject__school_class_id=class_id,
+                academic_year_id=year_id,
+                term_id=term_id,
+                status=Result.ResultStatus.PUBLISHED,
+            )
+            .values('student_id', 'subject_id', 'assessment_type', 'marks')
+        )
+        peer_subject_assessments = {}
+        for pr in peer_results:
+            subj_key = (pr['subject_id'], year_id, term_id)
+            peer_subject_assessments.setdefault(pr['student_id'], {}).setdefault(subj_key, {}).setdefault(pr['assessment_type'], []).append(float(pr['marks']))
+        peer_averages = []
+        for peer_id, peer_subjects in peer_subject_assessments.items():
+            peer_marks = []
+            for subj_key, assessments in peer_subjects.items():
+                m, _ = assessment_average(assessments, weight_map.get(subj_key, {}))
+                if m is not None:
+                    peer_marks.append(m)
+            if peer_marks:
+                peer_averages.append(sum(peer_marks) / len(peer_marks))
+        summary['position'] = 1 + sum(p > summary['average'] for p in peer_averages)
+
+    # Build grouped history: year -> terms
+    history = {}
+    for enrollment in enrollments_qs:
+        year_key = enrollment.academic_year_id
+        if year_key not in history:
+            history[year_key] = {
+                'academic_year_id': enrollment.academic_year_id,
+                'academic_year': enrollment.academic_year.name,
+                'terms': {},
+            }
+        term_key = enrollment.term_id
+        if term_key not in history[year_key]['terms']:
+            summary = term_summaries.get((enrollment.academic_year_id, enrollment.term_id), {})
+            history[year_key]['terms'][term_key] = {
+                'term_id': enrollment.term_id,
+                'term': enrollment.term.name,
+                'class_name': str(enrollment.school_class),
+                'class_id': enrollment.school_class_id,
+                **summary,
+            }
+
+    result = [
+        {
+            **year_data,
+            'terms': list(year_data['terms'].values()),
+        }
+        for year_data in history.values()
+    ]
+    return Response({
+        'student': {
+            'name': student.user.get_full_name() or student.user.username,
+            'admission_number': student.admission_number,
+        },
+        'history': result,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdmin])
+def bulk_promote_students(request):
+    """Enroll a list of students into a new class/term (promotion or new year).
+
+    Expects: { student_ids, school_class_id, academic_year_id, term_id }
+    Reuses BulkEnrollmentSerializer — same validation, different audit message.
+    """
+    serializer = BulkEnrollmentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    school_class = serializer.validated_data['school_class']
+    academic_year = serializer.validated_data['academic_year']
+    term = serializer.validated_data['term']
+    students_list = serializer.validated_data['students']
+
+    created, skipped = 0, 0
+    with transaction.atomic():
+        for student in students_list:
+            _, is_new = Enrollment.objects.get_or_create(
+                student=student, school_class=school_class,
+                academic_year=academic_year, term=term,
+            )
+            if is_new:
+                created += 1
+            else:
+                skipped += 1
+        if created:
+            AuditLog.objects.create(
+                actor=request.user, action='PROMOTE', model_name='Enrollment',
+                description=(
+                    f'Bulk promotion: {created} students enrolled in {school_class} '
+                    f'for {term.name} ({academic_year.name}).'
+                ),
+            )
+    return Response({'created': created, 'skipped': skipped}, status=status.HTTP_201_CREATED)
+
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminOrAcademicOfficer])
+def promotion_preview(request):
+    """Preview which students are eligible for promotion based on published results."""
+    serializer = PromotionPreviewSerializer(data=request.query_params)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    source_class_ids = serializer.validated_data['source_class_ids']
+    academic_year = serializer.validated_data['academic_year']
+    term = serializer.validated_data['term']
+    pass_mark = float(serializer.validated_data['pass_mark'])
+
+    if term.academic_year_id != academic_year.id:
+        return Response({'detail': 'Term must belong to the selected academic year.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    enrolled_students = Student.objects.filter(
+        enrollments__school_class_id__in=source_class_ids,
+        enrollments__academic_year=academic_year,
+        enrollments__term=term,
+    ).distinct().select_related('user')
+
+    published = (
+        Result.objects
+        .filter(
+            student__in=enrolled_students,
+            subject__school_class_id__in=source_class_ids,
+            academic_year=academic_year,
+            term=term,
+            status=Result.ResultStatus.PUBLISHED,
+        )
+        .values('student_id', 'subject_id', 'assessment_type', 'marks')
+    )
+
+    weight_rows = AssessmentWeight.objects.filter(
+        subject__school_class_id__in=source_class_ids,
+        academic_year=academic_year,
+        term=term,
+    ).values('subject_id', 'assessment_type', 'weight')
+    weight_map = {}
+    for w in weight_rows:
+        weight_map.setdefault(w['subject_id'], {})[w['assessment_type']] = float(w['weight'])
+
+    student_subject_assessments = {}
+    for row in published:
+        student_subject_assessments.setdefault(row['student_id'], {}).setdefault(
+            row['subject_id'], {}
+        ).setdefault(row['assessment_type'], []).append(float(row['marks']))
+
+    eligible, not_eligible, no_results = [], [], []
+    for student in enrolled_students:
+        subjects_data = student_subject_assessments.get(student.pk, {})
+        if not subjects_data:
+            no_results.append({
+                'id': student.pk,
+                'name': student.user.get_full_name() or student.user.username,
+                'admission_number': student.admission_number,
+                'average': None,
+            })
+            continue
+        marks = []
+        for subject_id, assessments in subjects_data.items():
+            mark, _ = assessment_average(assessments, weight_map.get(subject_id, {}))
+            if mark is not None:
+                marks.append(mark)
+        average = round(sum(marks) / len(marks), 2) if marks else None
+        entry = {
+            'id': student.pk,
+            'name': student.user.get_full_name() or student.user.username,
+            'admission_number': student.admission_number,
+            'average': average,
+        }
+        if average is not None and average >= pass_mark:
+            eligible.append(entry)
+        else:
+            not_eligible.append(entry)
+
+    eligible.sort(key=lambda x: x['average'] or 0, reverse=True)
+    not_eligible.sort(key=lambda x: x['average'] or 0, reverse=True)
+
+    return Response({
+        'pass_mark': pass_mark,
+        'eligible': eligible,
+        'not_eligible': not_eligible,
+        'no_results': no_results,
+        'summary': {
+            'eligible': len(eligible),
+            'not_eligible': len(not_eligible),
+            'no_results': len(no_results),
+            'total': len(eligible) + len(not_eligible) + len(no_results),
+        },
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsResultEditor])
+def request_result_correction(request, result_id):
+    """Teacher or admin requests a correction to a published result."""
+    try:
+        result = Result.objects.select_related('subject__teacher', 'student').get(pk=result_id)
+    except Result.DoesNotExist:
+        return Response({'detail': 'Result not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if result.status != Result.ResultStatus.PUBLISHED:
+        return Response({'detail': 'Only published results can be corrected.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.user.role == User.Role.TEACHER and (
+        result.subject.teacher_id is None or result.subject.teacher.user_id != request.user.id
+    ):
+        return Response({'detail': 'You may only request corrections for your assigned subjects.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if ResultCorrection.objects.filter(result=result, status=ResultCorrection.CorrectionStatus.PENDING).exists():
+        return Response({'detail': 'A correction request is already pending for this result.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer = ResultCorrectionRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        correction = ResultCorrection.objects.create(
+            result=result,
+            requested_by=request.user,
+            old_marks=result.marks,
+            new_marks=serializer.validated_data['new_marks'],
+            reason=serializer.validated_data['reason'],
+        )
+        AuditLog.objects.create(
+            actor=request.user,
+            action='CORRECTION_REQUESTED',
+            model_name='Result',
+            description=(
+                f'Correction requested for result {result.pk} '
+                f'({result.student.admission_number} - {result.subject.code}): '
+                f'{result.marks} -> {correction.new_marks}. Reason: {correction.reason}'
+            ),
+        )
+    return Response(ResultCorrectionSerializer(correction).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminOrAcademicOfficer])
+def list_result_corrections(request):
+    """List pending (or all) correction requests."""
+    corrections = ResultCorrection.objects.select_related(
+        'result__student__user', 'result__subject', 'requested_by', 'reviewed_by',
+    ).order_by('-created_at')
+    status_filter = request.query_params.get('status', '').strip().upper()
+    if status_filter in (s for s, _ in ResultCorrection.CorrectionStatus.choices):
+        corrections = corrections.filter(status=status_filter)
+    return Response(ResultCorrectionSerializer(corrections, many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrAcademicOfficer])
+def review_result_correction(request, correction_id):
+    """Academic officer approves or rejects a correction request."""
+    try:
+        correction = ResultCorrection.objects.select_related('result__subject__teacher').get(pk=correction_id)
+    except ResultCorrection.DoesNotExist:
+        return Response({'detail': 'Correction request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if correction.status != ResultCorrection.CorrectionStatus.PENDING:
+        return Response({'detail': 'This correction has already been reviewed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer = ResultCorrectionReviewSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    action = serializer.validated_data['action']
+    with transaction.atomic():
+        correction_locked = ResultCorrection.objects.select_for_update().get(pk=correction_id)
+        if correction_locked.status != ResultCorrection.CorrectionStatus.PENDING:
+            return Response({'detail': 'This correction has already been reviewed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.utils import timezone as tz
+        correction_locked.reviewed_by = request.user
+        correction_locked.review_comment = serializer.validated_data.get('review_comment', '')
+        correction_locked.reviewed_at = tz.now()
+
+        if action == 'approve':
+            correction_locked.status = ResultCorrection.CorrectionStatus.APPROVED
+            result = correction_locked.result
+            result.marks = correction_locked.new_marks
+            result.save(update_fields=['marks', 'grade', 'updated_at'])
+            AuditLog.objects.create(
+                actor=request.user,
+                action='CORRECTION_APPROVED',
+                model_name='Result',
+                description=(
+                    f'Correction approved for result {result.pk} '
+                    f'({result.student.admission_number} - {result.subject.code}): '
+                    f'{correction_locked.old_marks} -> {correction_locked.new_marks}.'
+                ),
+            )
+        else:
+            correction_locked.status = ResultCorrection.CorrectionStatus.REJECTED
+            AuditLog.objects.create(
+                actor=request.user,
+                action='CORRECTION_REJECTED',
+                model_name='Result',
+                description=(
+                    f'Correction rejected for result {correction_locked.result.pk}. '
+                    f'Comment: {correction_locked.review_comment}'
+                ),
+            )
+        correction_locked.save(update_fields=['status', 'reviewed_by', 'review_comment', 'reviewed_at'])
+
+    return Response(ResultCorrectionSerializer(correction_locked).data)
 
 
 @api_view(['GET'])

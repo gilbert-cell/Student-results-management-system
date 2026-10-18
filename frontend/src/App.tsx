@@ -9,6 +9,7 @@ type AuthenticatedUser = {
   username: string;
   name: string;
   role: Role;
+  must_change_password?: boolean;
 };
 
 type ManagedUser = {
@@ -48,32 +49,36 @@ const emptyUserForm: UserForm = {
 type StudentRecord = {
   id: number;
   full_name: string;
-  user?: { first_name?: string; last_name?: string; username?: string; email?: string; phone_number?: string };
+  user?: { first_name?: string; last_name?: string; username?: string; email?: string; phone_number?: string; is_active?: boolean };
   admission_number: string;
+  middle_name?: string;
   current_class: string;
   date_of_birth: string | null;
   gender: string;
   parent_name: string;
+  parent_phone?: string;
+  account_status?: 'ACTIVE' | 'PENDING_ACTIVATION' | 'PASSWORD_CHANGE_REQUIRED' | 'INACTIVE';
 };
 
 type TeacherRecord = { id: number; full_name: string; user: { username: string; first_name: string; last_name: string; email: string; phone_number: string }; employee_id: string; department: string; qualification: string; phone_number: string };
 type TeacherProfile = TeacherRecord & { account: { username: string; email: string; role: Role; is_active: boolean; date_joined: string; last_login: string | null } };
 type AccountProfile = { id: number; username: string; name: string; email?: string; role: Role };
-type SchoolClassRecord = { id: number; name: string; section: string; academic_year: AcademicYearOption; teacher: string | null; teacher_id: number | null; is_active: boolean };
-type ManagedSubjectRecord = { id: number; code: string; name: string; school_class: { id: number; name: string; academic_year: AcademicYearOption }; teacher: string | null; teacher_id: number | null; description: string };
+type SchoolClassRecord = { id: number; name: string; section: string; academic_year: AcademicYearOption; teacher: string | null; teacher_id: number | null; is_active: boolean; max_optional_subjects: number };
+type ManagedSubjectRecord = { id: number; code: string; name: string; school_class: { id: number; name: string; academic_year: AcademicYearOption }; teacher: string | null; teacher_id: number | null; description: string; is_optional: boolean };
+type SubjectRegistrationGroup = { school_class: SchoolClassRecord; academic_year: AcademicYearOption; term: { id: number; name: string }; max_optional_subjects: number; subjects: (ManagedSubjectRecord & { is_registered: boolean })[] };
 
 type DataManagementForm = {
   username: string; password: string; first_name: string; last_name: string; email: string; phone_number: string;
   admission_number: string; date_of_birth: string; gender: string; current_class: string;
   employee_id: string; department: string; qualification: string;
-  name: string; section: string; academic_year_id: string; teacher_id: string; is_active: boolean;
-  code: string; school_class_id: string; description: string;
+  name: string; section: string; academic_year_id: string; teacher_id: string; is_active: boolean; max_optional_subjects: string;
+  code: string; school_class_id: string; description: string; is_optional: boolean;
 };
 const emptyDataManagementForm: DataManagementForm = {
   username: '', password: '', first_name: '', last_name: '', email: '', phone_number: '',
   admission_number: '', date_of_birth: '', gender: '', current_class: '',
   employee_id: '', department: '', qualification: '', name: '', section: '', academic_year_id: '',
-  teacher_id: '', is_active: true, code: '', school_class_id: '', description: '',
+  teacher_id: '', is_active: true, max_optional_subjects: '2', code: '', school_class_id: '', description: '', is_optional: false,
 };
 
 type ResultRecord = {
@@ -437,6 +442,21 @@ function App() {
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [bulkImportRole, setBulkImportRole] = useState<'STUDENT' | 'TEACHER'>('STUDENT');
   const [bulkImportCsv, setBulkImportCsv] = useState('');
+  const [bulkImportAcademicYearId, setBulkImportAcademicYearId] = useState('');
+  const [bulkImportTermId, setBulkImportTermId] = useState('');
+  const [bulkImportPreview, setBulkImportPreview] = useState<{ rows: number; valid: number; errors: string[]; duplicates: string[] } | null>(null);
+  const [bulkActivationRecords, setBulkActivationRecords] = useState<{ admission_number: string; full_name: string; username: string; temporary_password: string }[]>([]);
+  const [studentInitialCredentials, setStudentInitialCredentials] = useState<{ admission_number: string; full_name: string; username: string; temporary_password: string } | null>(null);
+  const [firstLoginCurrentPassword, setFirstLoginCurrentPassword] = useState('');
+  const [firstLoginNewPassword, setFirstLoginNewPassword] = useState('');
+  const [firstLoginPasswordError, setFirstLoginPasswordError] = useState('');
+  const [isChangingFirstLoginPassword, setIsChangingFirstLoginPassword] = useState(false);
+  const [showStructureCsvImport, setShowStructureCsvImport] = useState(false);
+  const [structureCsvSection, setStructureCsvSection] = useState<'Classes' | 'Subjects'>('Classes');
+  const [structureCsvText, setStructureCsvText] = useState('');
+  const [structureCsvError, setStructureCsvError] = useState('');
+  const [structureCsvNotice, setStructureCsvNotice] = useState('');
+  const [isImportingStructureCsv, setIsImportingStructureCsv] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkImportError, setBulkImportError] = useState('');
   const [bulkImportNotice, setBulkImportNotice] = useState('');
@@ -444,7 +464,9 @@ function App() {
   const [resultYears, setResultYears] = useState<AcademicYearOption[]>([]);
   const [resultTerms, setResultTerms] = useState<TermOption[]>([]);
   const [resultSubjects, setResultSubjects] = useState<SubjectOption[]>([]);
-  const [studentAssignedSubjects, setStudentAssignedSubjects] = useState<ManagedSubjectRecord[]>([]);
+  const [subjectRegistrationGroups, setSubjectRegistrationGroups] = useState<SubjectRegistrationGroup[]>([]);
+  const [subjectRegistrationSelections, setSubjectRegistrationSelections] = useState<Record<string, number[]>>({});
+  const [savingSubjectRegistration, setSavingSubjectRegistration] = useState<string | null>(null);
   const [studentSubjectsError, setStudentSubjectsError] = useState('');
   const [isLoadingStudentSubjects, setIsLoadingStudentSubjects] = useState(false);
   const [resultEnrollments, setResultEnrollments] = useState<EnrollmentOption[]>([]);
@@ -605,8 +627,17 @@ function App() {
     const controller = new AbortController();
     setIsLoadingStudentSubjects(true);
     setStudentSubjectsError('');
-    readApi<ManagedSubjectRecord[]>('/subjects/', controller.signal)
-      .then((subjects) => setStudentAssignedSubjects(subjects))
+    const query = new URLSearchParams();
+    if (studentResultYearFilter) query.set('academic_year_id', studentResultYearFilter);
+    if (studentResultTermFilter) query.set('term_id', studentResultTermFilter);
+    readApi<SubjectRegistrationGroup[]>(`/subject-registrations/?${query.toString()}`, controller.signal)
+      .then((groups) => {
+        setSubjectRegistrationGroups(groups);
+        setSubjectRegistrationSelections(Object.fromEntries(groups.map((group) => [
+          `${group.school_class.id}:${group.term.id}`,
+          group.subjects.filter((subject) => subject.is_optional && subject.is_registered).map((subject) => subject.id),
+        ])));
+      })
       .catch((error: Error) => {
         if (error.name !== 'AbortError') setStudentSubjectsError(getSafeErrorMessage(error));
       })
@@ -614,7 +645,7 @@ function App() {
         if (!controller.signal.aborted) setIsLoadingStudentSubjects(false);
       });
     return () => controller.abort();
-  }, [user, activeSection, studentWorkspaceView]);
+  }, [user, activeSection, studentWorkspaceView, studentResultYearFilter, studentResultTermFilter]);
 
   useEffect(() => {
     if (!user || activeSection !== 'Assessment Weights') return;
@@ -715,6 +746,13 @@ function App() {
         setManagedAcademicYears(years);
         setManagedClasses(classes);
         setManagedTerms(terms);
+        const activeYear = years.find((year) => year.is_active) || years[0];
+        if (activeYear) {
+          setBulkImportAcademicYearId(String(activeYear.id));
+          const activeTerm = terms.find((term) => term.academic_year.id === activeYear.id && term.is_active)
+            || terms.find((term) => term.academic_year.id === activeYear.id);
+          setBulkImportTermId(activeTerm ? String(activeTerm.id) : '');
+        }
       })
       .catch((error: Error) => {
         if (error.name !== 'AbortError') setEnrollmentOptionsError(getSafeErrorMessage(error));
@@ -825,6 +863,9 @@ function App() {
     setDataManagementForm(emptyDataManagementForm);
     setDataManagementError('');
     setDataManagementNotice('');
+    setShowStructureCsvImport(false);
+    setStructureCsvError('');
+    setStructureCsvNotice('');
   }, [activeSection]);
 
   useEffect(() => {
@@ -1142,6 +1183,7 @@ function App() {
       const payload = await readResponse<{ user: AuthenticatedUser }>(response);
       await refreshCsrfToken();
       setUser(payload.user);
+      setFirstLoginCurrentPassword(payload.user.must_change_password ? password : '');
       setPassword('');
       setSelectedStudent(null);
       setStudents([]);
@@ -1378,6 +1420,31 @@ function App() {
     }
   }
 
+  async function handleFirstLoginPasswordChange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user) return;
+    const err = firstError(required(firstLoginCurrentPassword, 'Temporary password'), required(firstLoginNewPassword, 'New password'), minLen(firstLoginNewPassword, 8, 'New password'));
+    if (err) { setFirstLoginPasswordError(err); return; }
+    setFirstLoginPasswordError('');
+    setIsChangingFirstLoginPassword(true);
+    try {
+      await refreshCsrfToken();
+      const response = await fetch(`${apiRoot}/auth/change-password/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+        body: JSON.stringify({ current_password: firstLoginCurrentPassword, new_password: firstLoginNewPassword }),
+      });
+      await readResponse<{ detail: string }>(response);
+      setUser({ ...user, must_change_password: false });
+      setFirstLoginCurrentPassword('');
+      setFirstLoginNewPassword('');
+    } catch (error) {
+      setFirstLoginPasswordError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to update the password.');
+    } finally {
+      setIsChangingFirstLoginPassword(false);
+    }
+  }
+
   async function handleMarksSpreadsheet(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -1385,7 +1452,10 @@ function App() {
     setBulkError('');
     setBulkImportMessage('');
     try {
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const isCsv = file.name.toLowerCase().endsWith('.csv');
+      const workbook = isCsv
+        ? XLSX.read(await file.text(), { type: 'string' })
+        : XLSX.read(await file.arrayBuffer(), { type: 'array' });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
       if (!rows.length) throw new Error('The first worksheet has no student rows.');
@@ -1489,13 +1559,34 @@ function App() {
   }
 
   function parseCsvRows(csv: string): Record<string, string>[] {
-    const lines = csv.trim().split('\n').filter(Boolean);
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(',').map((h) => h.trim().replace(/^"|"$/g, ''));
-    return lines.slice(1).map((line) => {
-      const values = line.split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
-      return Object.fromEntries(headers.map((h, i) => [h, values[i] || '']));
-    });
+    if (!csv.trim()) return [];
+    const workbook = XLSX.read(csv, { type: 'string' });
+    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    if (!firstSheet) return [];
+    return XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: '' })
+      .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, String(value).trim()])));
+  }
+
+  async function previewStudentImport() {
+    if (!bulkImportAcademicYearId || !bulkImportTermId) { setBulkImportError('Select an academic year and term before previewing.'); return; }
+    let rows: Record<string, string>[];
+    try { rows = parseCsvRows(bulkImportCsv); } catch { rows = []; }
+    if (!rows.length) { setBulkImportError('Choose a CSV file or paste CSV data with a header row.'); setBulkImportPreview(null); return; }
+    setIsBulkImporting(true);
+    setBulkImportError('');
+    try {
+      const response = await fetch(`${apiRoot}/students/import/preview/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+        body: JSON.stringify({ rows, academic_year_id: Number(bulkImportAcademicYearId), term_id: Number(bulkImportTermId) }),
+      });
+      const payload = await readResponse<{ total: number; valid: number; errors: string[]; duplicates: string[] }>(response);
+      setBulkImportPreview({ rows: payload.total, valid: payload.valid, errors: payload.errors, duplicates: payload.duplicates });
+    } catch (error) {
+      setBulkImportError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to preview student CSV.');
+    } finally {
+      setIsBulkImporting(false);
+    }
   }
 
   async function handleBulkImport(event: FormEvent<HTMLFormElement>) {
@@ -1506,18 +1597,25 @@ function App() {
     setBulkImportNotice('');
     setIsBulkImporting(true);
     try {
-      const rows = parseCsvRows(bulkImportCsv);
-      if (!rows.length) { setBulkImportError('Paste valid CSV data with a header row.'); setIsBulkImporting(false); return; }
-      const response = await fetch(`${apiRoot}/users/bulk-import/`, {
+      let rows: Record<string, string>[];
+      try { rows = parseCsvRows(bulkImportCsv); } catch { rows = []; }
+      if (!rows.length || (bulkImportRole === 'STUDENT' && (!bulkImportPreview?.valid || !bulkImportAcademicYearId || !bulkImportTermId))) { setBulkImportError('Select an academic year and term, then preview the CSV before importing.'); setIsBulkImporting(false); return; }
+      const response = await fetch(`${apiRoot}/${bulkImportRole === 'STUDENT' ? 'students/import/' : 'users/bulk-import/'}`, {
         method: 'POST',
         credentials: 'include',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
-        body: JSON.stringify({ role: bulkImportRole, rows }),
+        body: JSON.stringify(bulkImportRole === 'STUDENT'
+          ? { rows, academic_year_id: Number(bulkImportAcademicYearId), term_id: Number(bulkImportTermId) }
+          : { role: bulkImportRole, rows }),
       });
-      const payload = await readResponse<{ created: number }>(response);
+      const payload = await readResponse<{ created: number; skipped?: number; errors?: string[]; duplicates?: string[]; credentials?: { admission_number: string; full_name: string; username: string; temporary_password: string }[] }>(response);
       setBulkImportCsv('');
+      setBulkImportPreview(null);
+      setBulkActivationRecords(payload.credentials || []);
       setShowBulkImport(false);
-      setBulkImportNotice(`${payload.created} ${bulkImportRole.toLowerCase()} account(s) created.`);
+      setBulkImportNotice(bulkImportRole === 'STUDENT'
+        ? `${payload.created} student account(s) created. Save the temporary login details below; they are shown only once. Students must change their password at first login.`
+        : `${payload.created} ${bulkImportRole.toLowerCase()} account(s) created. Teacher usernames use employee IDs; passwords are unset.${payload.skipped ? ` ${payload.skipped} row(s) skipped: ${payload.errors?.slice(0, 3).join(' ') || 'See validation errors.'}` : ''}`);
       if (bulkImportRole === 'STUDENT') setStudents(await readApi<StudentRecord[]>('/students/'));
       else setManagedTeachers(await readApi<TeacherRecord[]>('/teachers/'));
     } catch (error) {
@@ -1525,6 +1623,75 @@ function App() {
     } finally {
       setIsBulkImporting(false);
     }
+  }
+
+  async function handleStructureCsvImport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    let rows: Record<string, string>[];
+    try { rows = parseCsvRows(structureCsvText); } catch { rows = []; }
+    if (!rows.length) { setStructureCsvError('Choose a CSV file or paste CSV data with a header row.'); return; }
+    setIsImportingStructureCsv(true);
+    setStructureCsvError('');
+    setStructureCsvNotice('');
+    const errors: string[] = [];
+    let created = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const source = rows[index];
+      const row: Record<string, string> = {};
+      Object.entries(source).forEach(([key, value]) => {
+        row[key.trim().toLowerCase().replace(/[\s-]+/g, '_')] = String(value ?? '').trim();
+      });
+      let endpoint = '';
+      let payload: Record<string, unknown> = {};
+      if (structureCsvSection === 'Classes') {
+        const yearValue = row.academic_year_id || row.academic_year || row.year;
+        const year = managedAcademicYears.find((item) => String(item.id) === yearValue || item.name.toLowerCase() === yearValue?.toLowerCase());
+        const teacherValue = row.teacher_id || row.teacher_employee_id || row.employee_id;
+        const teacher = teacherValue ? managedTeachers.find((item) => String(item.id) === teacherValue || item.employee_id.toLowerCase() === teacherValue.toLowerCase()) : undefined;
+        if (!row.name || !year) { errors.push(`Row ${index + 2}: class name and a valid academic_year are required.`); continue; }
+        if (teacherValue && !teacher) { errors.push(`Row ${index + 2}: teacher ${teacherValue} was not found.`); continue; }
+        const section = row.section || '';
+        if (managedClasses.some((item) => item.name.toLowerCase() === row.name.toLowerCase() && item.section.toLowerCase() === section.toLowerCase() && item.academic_year.id === year.id)) {
+          errors.push(`Row ${index + 2}: class ${row.name} ${section} already exists for ${year.name}.`); continue;
+        }
+        endpoint = '/classes/';
+        payload = { name: row.name, section, academic_year_id: year.id, teacher_id: teacher?.id || null, is_active: !['false', '0', 'no', 'inactive'].includes((row.is_active || 'true').toLowerCase()), max_optional_subjects: Number(row.max_optional_subjects || 2) };
+      } else {
+        const classValue = row.school_class_id || row.class_id || row.class_name || row.class;
+        const classYear = row.academic_year || row.year;
+        const matchingClasses = managedClasses.filter((item) => {
+          const label = `${item.name}${item.section ? ` ${item.section}` : ''}`;
+          const matchesName = String(item.id) === classValue || label.toLowerCase() === classValue?.toLowerCase() || (item.name.toLowerCase() === classValue?.toLowerCase() && (!row.section || item.section.toLowerCase() === row.section.toLowerCase()));
+          const matchesYear = !classYear || item.academic_year.name.toLowerCase() === classYear.toLowerCase() || String(item.academic_year.id) === classYear;
+          return matchesName && matchesYear;
+        });
+        const schoolClass = matchingClasses.length === 1 ? matchingClasses[0] : undefined;
+        const teacherValue = row.teacher_id || row.teacher_employee_id || row.employee_id;
+        const teacher = teacherValue ? managedTeachers.find((item) => String(item.id) === teacherValue || item.employee_id.toLowerCase() === teacherValue.toLowerCase()) : undefined;
+        if (!row.code || !row.name || !schoolClass) { errors.push(`Row ${index + 2}: code, name, and a valid class are required.`); continue; }
+        if (teacherValue && !teacher) { errors.push(`Row ${index + 2}: teacher ${teacherValue} was not found.`); continue; }
+        if (managedSubjects.some((item) => item.code.toLowerCase() === row.code.toLowerCase())) { errors.push(`Row ${index + 2}: subject code ${row.code} already exists.`); continue; }
+        endpoint = '/subjects/';
+        payload = { code: row.code, name: row.name, school_class_id: schoolClass.id, teacher_id: teacher?.id || null, description: row.description || '', is_optional: ['true', '1', 'yes', 'optional'].includes((row.is_optional || 'false').toLowerCase()) };
+      }
+      try {
+        const response = await fetch(`${apiRoot}${endpoint}`, {
+          method: 'POST', credentials: 'include',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+          body: JSON.stringify(payload),
+        });
+        await readResponse<unknown>(response);
+        created += 1;
+      } catch (error) {
+        errors.push(`Row ${index + 2}: ${error instanceof Error ? getSafeErrorMessage(error) : 'Unable to create record.'}`);
+      }
+    }
+    try { await refreshDataManagementList(structureCsvSection); } catch { /* keep the import summary visible */ }
+    setStructureCsvNotice(`${created} ${structureCsvSection.toLowerCase()} record(s) uploaded.${errors.length ? ` ${errors.length} row(s) need attention.` : ''}`);
+    setStructureCsvError(errors.slice(0, 20).join('\n'));
+    setStructureCsvText('');
+    setShowStructureCsvImport(false);
+    setIsImportingStructureCsv(false);
   }
 
   async function handleSaveResult(event: FormEvent<HTMLFormElement>) {
@@ -1742,14 +1909,14 @@ function App() {
         ...emptyDataManagementForm,
         name: schoolClass.name, section: schoolClass.section,
         academic_year_id: String(schoolClass.academic_year.id), teacher_id: schoolClass.teacher_id ? String(schoolClass.teacher_id) : '',
-        is_active: schoolClass.is_active,
+        is_active: schoolClass.is_active, max_optional_subjects: String(schoolClass.max_optional_subjects ?? 2),
       });
     } else {
       const subject = record as ManagedSubjectRecord;
       setDataManagementForm({
         ...emptyDataManagementForm,
         code: subject.code, name: subject.name, school_class_id: String(subject.school_class.id),
-        teacher_id: subject.teacher_id ? String(subject.teacher_id) : '', description: subject.description,
+        teacher_id: subject.teacher_id ? String(subject.teacher_id) : '', description: subject.description, is_optional: subject.is_optional,
       });
     }
   }
@@ -1768,10 +1935,6 @@ function App() {
       err = firstError(
         required(dataManagementForm.first_name, 'First name'),
         required(dataManagementForm.last_name, 'Last name'),
-        required(dataManagementForm.admission_number, 'Admission number'),
-        !editingDataRecordId ? required(dataManagementForm.username, 'Username') : '',
-        !editingDataRecordId ? required(dataManagementForm.password, 'Password') : '',
-        !editingDataRecordId ? minLen(dataManagementForm.password, 8, 'Password') : '',
         validEmail(dataManagementForm.email),
         validPhone(dataManagementForm.phone_number),
       );
@@ -1803,6 +1966,7 @@ function App() {
     setIsSavingDataManagement(true);
     setDataManagementError('');
     setDataManagementNotice('');
+    setStudentInitialCredentials(null);
     try {
       let endpoint = '';
       let payload: Record<string, unknown> = {};
@@ -1810,7 +1974,6 @@ function App() {
         endpoint = `/students/${editingDataRecordId ? `${editingDataRecordId}/` : ''}`;
         const { first_name, last_name, email, phone_number, admission_number, date_of_birth, gender, current_class } = dataManagementForm;
         payload = { first_name, last_name, email, phone_number, admission_number, date_of_birth: date_of_birth || null, gender, current_class };
-        if (!editingDataRecordId) Object.assign(payload, { username: dataManagementForm.username, password: dataManagementForm.password });
       } else if (activeSection === 'Teachers') {
         endpoint = `/teachers/${editingDataRecordId ? `${editingDataRecordId}/` : ''}`;
         const { first_name, last_name, email, employee_id, department, qualification, phone_number } = dataManagementForm;
@@ -1819,22 +1982,29 @@ function App() {
         else if (dataManagementForm.password) Object.assign(payload, { password: dataManagementForm.password });
       } else if (activeSection === 'Classes') {
         endpoint = `/classes/${editingDataRecordId ? `${editingDataRecordId}/` : ''}`;
-        payload = { name: dataManagementForm.name, section: dataManagementForm.section, academic_year_id: Number(dataManagementForm.academic_year_id), teacher_id: dataManagementForm.teacher_id ? Number(dataManagementForm.teacher_id) : null, is_active: dataManagementForm.is_active };
+        payload = { name: dataManagementForm.name, section: dataManagementForm.section, academic_year_id: Number(dataManagementForm.academic_year_id), teacher_id: dataManagementForm.teacher_id ? Number(dataManagementForm.teacher_id) : null, is_active: dataManagementForm.is_active, max_optional_subjects: Number(dataManagementForm.max_optional_subjects) };
       } else {
         endpoint = `/subjects/${editingDataRecordId ? `${editingDataRecordId}/` : ''}`;
-        payload = { code: dataManagementForm.code, name: dataManagementForm.name, school_class_id: Number(dataManagementForm.school_class_id), teacher_id: dataManagementForm.teacher_id ? Number(dataManagementForm.teacher_id) : null, description: dataManagementForm.description };
+        payload = { code: dataManagementForm.code, name: dataManagementForm.name, school_class_id: Number(dataManagementForm.school_class_id), teacher_id: dataManagementForm.teacher_id ? Number(dataManagementForm.teacher_id) : null, description: dataManagementForm.description, is_optional: dataManagementForm.is_optional };
       }
       const response = await fetch(`${apiRoot}${endpoint}`, {
         method: editingDataRecordId ? 'PATCH' : 'POST', credentials: 'include',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
         body: JSON.stringify(payload),
       });
-      await readResponse<unknown>(response);
+      const savedRecord = await readResponse<{ admission_number?: string; full_name?: string; initial_credentials?: { username: string; temporary_password: string } }>(response);
       await refreshDataManagementList(activeSection);
       setShowDataManagementForm(false);
       setEditingDataRecordId(null);
       setDataManagementForm(emptyDataManagementForm);
       setDataManagementNotice(`${activeSection === 'Classes' ? 'Class' : activeSection === 'Subjects' ? 'Subject' : activeSection === 'Teachers' ? 'Teacher' : 'Student'} ${editingDataRecordId ? 'updated' : 'created'}.`);
+      if (activeSection === 'Students' && !editingDataRecordId && savedRecord.initial_credentials) {
+        setStudentInitialCredentials({
+          admission_number: savedRecord.admission_number || '',
+          full_name: savedRecord.full_name || `${dataManagementForm.first_name} ${dataManagementForm.last_name}`.trim(),
+          ...savedRecord.initial_credentials,
+        });
+      }
     } catch (error) {
       setDataManagementError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to save this record.');
     } finally {
@@ -1846,6 +2016,45 @@ function App() {
     setEnrollmentForm({ ...emptyEnrollmentForm, student_id: String(student.id) });
     setEnrollmentError('');
     setShowEnrollmentForm(true);
+  }
+
+  async function saveSubjectRegistration(group: SubjectRegistrationGroup) {
+    const key = `${group.school_class.id}:${group.term.id}`;
+    setSavingSubjectRegistration(key);
+    setStudentSubjectsError('');
+    try {
+      const response = await fetch(`${apiRoot}/subject-registrations/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+        body: JSON.stringify({ school_class_id: group.school_class.id, term_id: group.term.id, subject_ids: subjectRegistrationSelections[key] || [] }),
+      });
+      await readResponse<{ detail: string }>(response);
+      const query = new URLSearchParams({ academic_year_id: String(group.academic_year.id), term_id: String(group.term.id) });
+      const updated = await readApi<SubjectRegistrationGroup[]>(`/subject-registrations/?${query.toString()}`);
+      setSubjectRegistrationGroups((previous) => [...previous.filter((item) => `${item.school_class.id}:${item.term.id}` !== key), ...updated]);
+    } catch (error) {
+      setStudentSubjectsError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to save subject selection.');
+    } finally {
+      setSavingSubjectRegistration(null);
+    }
+  }
+
+  async function handleResetStudentLogin(student: StudentRecord) {
+    setDataManagementError('');
+    setStudentInitialCredentials(null);
+    try {
+      await refreshCsrfToken();
+      const response = await fetch(`${apiRoot}/students/${student.id}/login-credentials/`, {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'X-CSRFToken': getCsrfToken() },
+      });
+      const credentials = await readResponse<{ admission_number: string; full_name: string; username: string; temporary_password: string }>(response);
+      setStudentInitialCredentials(credentials);
+      setDataManagementNotice('Student login details reset. Share these details with the student.');
+      setStudents(await readApi<StudentRecord[]>('/students/'));
+    } catch (error) {
+      setDataManagementError(error instanceof Error ? getSafeErrorMessage(error) : 'Unable to reset student login details.');
+    }
   }
 
   async function handleCreateEnrollment(event: FormEvent<HTMLFormElement>) {
@@ -2053,6 +2262,22 @@ function App() {
             </form>
           )}
         </section>
+      </main>
+    );
+  }
+
+  if (user.must_change_password) {
+    return (
+      <main className="auth-shell">
+        <form className="login-card" onSubmit={handleFirstLoginPasswordChange}>
+          <span className="eyebrow">FIRST SIGN IN</span>
+          <h2>Change your temporary password</h2>
+          <p className="login-subtitle">Set a new password before continuing to your school account.</p>
+          <label className="form-field"><span>Temporary password</span><input required type="password" autoComplete="current-password" value={firstLoginCurrentPassword} onChange={(event) => setFirstLoginCurrentPassword(event.target.value)} /></label>
+          <label className="form-field"><span>New password</span><input required type="password" minLength={8} autoComplete="new-password" value={firstLoginNewPassword} onChange={(event) => setFirstLoginNewPassword(event.target.value)} /></label>
+          {firstLoginPasswordError ? <p className="form-error" role="alert">{firstLoginPasswordError}</p> : null}
+          <button className="sign-in-btn" type="submit" disabled={isChangingFirstLoginPassword}>{isChangingFirstLoginPassword ? 'Updating...' : 'Save new password'}</button>
+        </form>
       </main>
     );
   }
@@ -2326,16 +2551,17 @@ function App() {
           </section>
         ) : activeSection === 'Teachers' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
-            <div className="panel-header"><div><span className="eyebrow">Staff records</span><h3>Teachers</h3></div>{isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('TEACHER'); setBulkImportError(''); setBulkImportNotice(''); }}>Import CSV</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add teacher</button></div> : null}</div>
+            <div className="panel-header"><div><span className="eyebrow">Staff records</span><h3>Teachers</h3></div>{isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('TEACHER'); setBulkImportError(''); setBulkImportNotice(''); }}>Upload CSV</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add teacher</button></div> : null}</div>
             <p className="empty-note data-management-description">Maintain teacher profiles and the staff records used for class and subject assignments.</p>
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
             {bulkImportNotice && bulkImportRole === 'TEACHER' ? <p className="user-management-notice" role="status">{bulkImportNotice}</p> : null}
             {showBulkImport && bulkImportRole === 'TEACHER' ? (
               <form className="academic-year-form" onSubmit={handleBulkImport}>
                 <div className="user-form-heading"><span className="eyebrow">CSV import</span><h3>Import teacher accounts</h3></div>
-                <p className="empty-note" style={{ marginBottom: 10 }}>Required columns: <code>username, password, first_name, last_name, employee_id</code>. Optional: <code>email, department, qualification</code></p>
+                <p className="empty-note" style={{ marginBottom: 10 }}>Required columns: <code>first_name, last_name, employee_id</code>. Optional: <code>email, department, qualification</code>. The system uses employee_id as the username and creates the account without a password.</p>
                 {bulkImportError ? <p className="dashboard-error" role="alert">{bulkImportError}</p> : null}
-                <label className="form-field"><span>Paste CSV data</span><textarea className="bulk-import-textarea" required rows={8} value={bulkImportCsv} onChange={(e) => setBulkImportCsv(e.target.value)} placeholder={`username,password,first_name,last_name,employee_id,department\njdoe,Pass1234!,John,Doe,T001,Science`} /></label>
+                <label className="form-field"><span>Choose CSV file</span><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; file.text().then((text) => setBulkImportCsv(text)).catch(() => setBulkImportError('Unable to read the selected CSV file.')); }} /></label>
+                <label className="form-field"><span>Paste CSV data</span><textarea className="bulk-import-textarea" required rows={8} value={bulkImportCsv} onChange={(e) => setBulkImportCsv(e.target.value)} placeholder={`first_name,last_name,employee_id,email,department,qualification\nJohn,Doe,T001,jdoe@example.com,Science,BSc`} /></label>
                 <div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isBulkImporting}>{isBulkImporting ? 'Importing...' : 'Import teachers'}</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport(false); setBulkImportCsv(''); }}>Cancel</button></div>
               </form>
             ) : null}
@@ -2357,27 +2583,35 @@ function App() {
           </section>
         ) : activeSection === 'Classes' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
-            <div className="panel-header"><div><span className="eyebrow">Academic structure</span><h3>Classes</h3></div>{isAdminWorkspace ? <button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add class</button> : null}</div>
+            <div className="panel-header"><div><span className="eyebrow">Academic structure</span><h3>Classes</h3></div>{isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setStructureCsvSection('Classes'); setStructureCsvText(''); setStructureCsvError(''); setStructureCsvNotice(''); setShowStructureCsvImport(true); }}>Upload CSV</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add class</button></div> : null}</div>
             <p className="empty-note data-management-description">Set up classes by academic year and assign a class teacher.</p>
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
+            {structureCsvNotice && structureCsvSection === 'Classes' ? <p className="user-management-notice" role="status">{structureCsvNotice}</p> : null}
+            {structureCsvError && structureCsvSection === 'Classes' ? <p className="dashboard-error" role="alert" style={{ whiteSpace: 'pre-line' }}>{structureCsvError}</p> : null}
+            {showStructureCsvImport && structureCsvSection === 'Classes' ? <form className="academic-year-form" onSubmit={handleStructureCsvImport}><div className="user-form-heading"><span className="eyebrow">Class records</span><h3>Upload classes CSV</h3></div><p className="empty-note">Required columns: <code>name, academic_year</code>. Optional: <code>section, teacher_employee_id, is_active, max_optional_subjects</code>. The optional subject limit defaults to 2.</p><label className="form-field"><span>Choose CSV file</span><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; file.text().then((text) => setStructureCsvText(text)).catch(() => setStructureCsvError('Unable to read the selected CSV file.')); }} /></label><label className="form-field"><span>Or paste CSV data</span><textarea className="bulk-import-textarea" rows={6} value={structureCsvText} onChange={(event) => setStructureCsvText(event.target.value)} placeholder={'name,section,academic_year,teacher_employee_id,is_active,max_optional_subjects\nForm I,A,2026/2027,T001,true,2'} /></label><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isImportingStructureCsv}>{isImportingStructureCsv ? 'Uploading...' : 'Upload classes'}</button><button className="ghost-btn" type="button" onClick={() => setShowStructureCsvImport(false)}>Cancel</button></div></form> : null}
             {showDataManagementForm && (isAdminWorkspace || editingDataRecordId !== null) ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update class' : 'New class'}</span><h3>{editingDataRecordId ? 'Edit class details' : 'Add class'}</h3></div><div className="academic-year-grid">
               <label className="form-field"><span>Class name</span><input required maxLength={80} value={dataManagementForm.name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, name: event.target.value })} placeholder="e.g. Form 1" /></label><label className="form-field"><span>Section</span><input maxLength={40} value={dataManagementForm.section} onChange={(event) => setDataManagementForm({ ...dataManagementForm, section: event.target.value })} placeholder="Optional" /></label>
               <label className="form-field"><span>Academic year</span><select required disabled={editingDataRecordId !== null} value={dataManagementForm.academic_year_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, academic_year_id: event.target.value })}><option value="">Select year</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label className="form-field"><span>Class teacher</span><select value={dataManagementForm.teacher_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, teacher_id: event.target.value })}><option value="">Unassigned</option>{managedTeachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name} ({teacher.employee_id})</option>)}</select></label>
               <label className="academic-year-active"><input type="checkbox" checked={dataManagementForm.is_active} onChange={(event) => setDataManagementForm({ ...dataManagementForm, is_active: event.target.checked })} /><span>Class is active</span></label>
+              <label className="form-field"><span>Maximum optional subjects per student</span><input type="number" min={0} max={20} value={dataManagementForm.max_optional_subjects} onChange={(event) => setDataManagementForm({ ...dataManagementForm, max_optional_subjects: event.target.value })} /></label>
             </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Save class'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); }}>Cancel</button></div></form> : null}
-            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Class</th><th>Year</th><th>Class teacher</th><th>Status</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedClasses.map((schoolClass) => <tr key={schoolClass.id}><td>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</td><td>{schoolClass.academic_year.name}</td><td>{schoolClass.teacher || 'Unassigned'}</td><td><span className={`account-status ${schoolClass.is_active ? 'active' : 'inactive'}`}>{schoolClass.is_active ? 'Active' : 'Inactive'}</span></td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(schoolClass)}>Edit</button></td> : null}</tr>)}{!managedClasses.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 5 : 4} className="empty-table">No classes found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading classes...</p> : null}
+            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Class</th><th>Year</th><th>Optional limit</th><th>Class teacher</th><th>Status</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedClasses.map((schoolClass) => <tr key={schoolClass.id}><td>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</td><td>{schoolClass.academic_year.name}</td><td>{schoolClass.max_optional_subjects}</td><td>{schoolClass.teacher || 'Unassigned'}</td><td><span className={`account-status ${schoolClass.is_active ? 'active' : 'inactive'}`}>{schoolClass.is_active ? 'Active' : 'Inactive'}</span></td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(schoolClass)}>Edit</button></td> : null}</tr>)}{!managedClasses.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 6 : 5} className="empty-table">No classes found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading classes...</p> : null}
           </section>
         ) : activeSection === 'Subjects' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
           <section className="panel data-management-panel">
-            <div className="panel-header"><div><span className="eyebrow">Curriculum</span><h3>Subjects</h3></div>{isAdminWorkspace ? <button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add subject</button> : null}</div>
-            <p className="empty-note data-management-description">Attach subjects to a class and assign the teacher responsible for entering marks.</p>
+            <div className="panel-header"><div><span className="eyebrow">Curriculum</span><h3>Subjects</h3></div>{isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setStructureCsvSection('Subjects'); setStructureCsvText(''); setStructureCsvError(''); setStructureCsvNotice(''); setShowStructureCsvImport(true); }}>Upload CSV</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add subject</button></div> : null}</div>
+        <p className="empty-note data-management-description">Attach subjects to a class, assign the teacher, and mark electives as optional so students can register for them.</p>
             {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
+            {structureCsvNotice && structureCsvSection === 'Subjects' ? <p className="user-management-notice" role="status">{structureCsvNotice}</p> : null}
+            {structureCsvError && structureCsvSection === 'Subjects' ? <p className="dashboard-error" role="alert" style={{ whiteSpace: 'pre-line' }}>{structureCsvError}</p> : null}
+            {showStructureCsvImport && structureCsvSection === 'Subjects' ? <form className="academic-year-form" onSubmit={handleStructureCsvImport}><div className="user-form-heading"><span className="eyebrow">Subject records</span><h3>Upload subjects CSV</h3></div><p className="empty-note">Required columns: <code>code, name, class_name</code>. Optional: <code>section, academic_year, teacher_employee_id, description, is_optional</code>. Use true/yes for optional subjects.</p><label className="form-field"><span>Choose CSV file</span><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; file.text().then((text) => setStructureCsvText(text)).catch(() => setStructureCsvError('Unable to read the selected CSV file.')); }} /></label><label className="form-field"><span>Or paste CSV data</span><textarea className="bulk-import-textarea" rows={6} value={structureCsvText} onChange={(event) => setStructureCsvText(event.target.value)} placeholder={'code,name,class_name,section,academic_year,teacher_employee_id,description,is_optional\nMATH,Mathematics,Form I,A,2026/2027,T001,Core subject,false'} /></label><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isImportingStructureCsv}>{isImportingStructureCsv ? 'Uploading...' : 'Upload subjects'}</button><button className="ghost-btn" type="button" onClick={() => setShowStructureCsvImport(false)}>Cancel</button></div></form> : null}
             {showDataManagementForm && (isAdminWorkspace || editingDataRecordId !== null) ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}><div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update subject' : 'New subject'}</span><h3>{editingDataRecordId ? 'Edit subject details' : 'Add subject'}</h3></div><div className="academic-year-grid">
               <label className="form-field"><span>Subject code</span><input required maxLength={20} value={dataManagementForm.code} onChange={(event) => setDataManagementForm({ ...dataManagementForm, code: event.target.value })} /></label><label className="form-field"><span>Subject name</span><input required maxLength={120} value={dataManagementForm.name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, name: event.target.value })} /></label>
               <label className="form-field"><span>Class</span><select required value={dataManagementForm.school_class_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, school_class_id: event.target.value })}><option value="">Select class</option>{managedClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''} · {schoolClass.academic_year.name}</option>)}</select></label><label className="form-field"><span>Assigned teacher</span><select value={dataManagementForm.teacher_id} onChange={(event) => setDataManagementForm({ ...dataManagementForm, teacher_id: event.target.value })}><option value="">Unassigned</option>{managedTeachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name} ({teacher.employee_id})</option>)}</select></label>
               <label className="form-field"><span>Description</span><textarea rows={2} value={dataManagementForm.description} onChange={(event) => setDataManagementForm({ ...dataManagementForm, description: event.target.value })} /></label>
+              <label className="academic-year-active"><input type="checkbox" checked={dataManagementForm.is_optional} onChange={(event) => setDataManagementForm({ ...dataManagementForm, is_optional: event.target.checked })} /><span>Optional subject (students must register)</span></label>
             </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Save subject'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); }}>Cancel</button></div></form> : null}
-            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Code</th><th>Subject</th><th>Class</th><th>Teacher</th><th>Description</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedSubjects.map((subject) => <tr key={subject.id}><td>{subject.code}</td><td>{subject.name}</td><td>{subject.school_class.name} · {subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Unassigned'}</td><td>{subject.description || '—'}</td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(subject)}>Edit</button></td> : null}</tr>)}{!managedSubjects.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 6 : 5} className="empty-table">No subjects found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading subjects...</p> : null}
+            <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Code</th><th>Subject</th><th>Type</th><th>Class</th><th>Teacher</th><th>Description</th>{isAdminWorkspace ? <th>Actions</th> : null}</tr></thead><tbody>{managedSubjects.map((subject) => <tr key={subject.id}><td>{subject.code}</td><td>{subject.name}</td><td>{subject.is_optional ? 'Optional' : 'Compulsory'}</td><td>{subject.school_class.name} · {subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Unassigned'}</td><td>{subject.description || '—'}</td>{isAdminWorkspace ? <td><button className="text-btn" type="button" onClick={() => startDataManagementEdit(subject)}>Edit</button></td> : null}</tr>)}{!managedSubjects.length && !isLoadingDataManagement ? <tr><td colSpan={isAdminWorkspace ? 7 : 6} className="empty-table">No subjects found.</td></tr> : null}</tbody></table></div>{isLoadingDataManagement ? <p className="empty-note">Loading subjects...</p> : null}
           </section>
         ) : activeSection === 'Results' && ['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER', 'TEACHER'].includes(user.role) ? (
           <section className="panel result-workspace">
@@ -2444,11 +2678,11 @@ function App() {
                   </label>
                 </div>
                 <div className="user-form-actions" style={{ marginBottom: 14 }}>
-                  <label className="ghost-btn" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
-                    Import Excel marks
-                    <input type="file" accept=".xlsx,.xls" onChange={handleMarksSpreadsheet} style={{ display: 'none' }} disabled={!bulkRows.length} />
+                  <label className="ghost-btn" style={{ display: 'inline-flex', alignItems: 'center', cursor: bulkRows.length ? 'pointer' : 'not-allowed' }}>
+                    Import CSV / Excel marks
+                    <input type="file" accept=".csv,.xlsx,.xls,text/csv" onChange={handleMarksSpreadsheet} style={{ display: 'none' }} disabled={!bulkRows.length} />
                   </label>
-                  <span className="empty-note">First worksheet columns: Student ID (admission number), Name (optional), Marks. Check imported marks below before saving.</span>
+                  <span className="empty-note">CSV columns: Student ID (admission number), Marks, and optional Name. Excel files are also supported. Check imported marks below before saving.</span>
                 </div>
                 {bulkRows.length > 0 ? (
                   <>
@@ -2679,20 +2913,25 @@ function App() {
             <section className="panel table-panel">
               <div className="panel-header">
                 <div><span className="eyebrow">School records</span><h3>{selectedStudent ? selectedStudent.full_name : 'Students'}</h3></div>
-                {selectedStudent ? user.role !== 'STUDENT' ? <button className="ghost-btn" type="button" onClick={() => setSelectedStudent(null)}>Back to students</button> : null : isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('STUDENT'); setBulkImportError(''); setBulkImportNotice(''); setShowBulkEnrollForm(false); }}>Import CSV</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkEnrollForm((v) => !v); setShowEnrollmentForm(false); setBulkEnrollError(''); setShowBulkImport(false); }}>Bulk enroll</button><button className="ghost-btn" type="button" onClick={() => { setEnrollmentForm(emptyEnrollmentForm); setEnrollmentError(''); setShowEnrollmentForm((shown) => !shown); setShowBulkEnrollForm(false); setShowBulkImport(false); }}>Enroll student</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add student</button></div> : null}
+                {selectedStudent ? user.role !== 'STUDENT' ? <button className="ghost-btn" type="button" onClick={() => setSelectedStudent(null)}>Back to students</button> : null : isAdminWorkspace ? <div className="student-header-actions"><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport((v) => !v); setBulkImportRole('STUDENT'); setBulkImportError(''); setBulkImportNotice(''); setShowBulkEnrollForm(false); }}>Upload CSV</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkEnrollForm((v) => !v); setShowEnrollmentForm(false); setBulkEnrollError(''); setShowBulkImport(false); }}>Bulk enroll</button><button className="ghost-btn" type="button" onClick={() => { setEnrollmentForm(emptyEnrollmentForm); setEnrollmentError(''); setShowEnrollmentForm((shown) => !shown); setShowBulkEnrollForm(false); setShowBulkImport(false); }}>Enroll student</button><button className="primary-btn" type="button" onClick={startDataManagementCreate}>Add student</button></div> : null}
               </div>
               {!selectedStudent ? (
                 <>
                   {dataManagementError ? <p className="dashboard-error" role="alert">{dataManagementError}</p> : null}{dataManagementNotice ? <p className="user-management-notice" role="status">{dataManagementNotice}</p> : null}
+                  {studentInitialCredentials ? <div className="import-preview"><strong>Save this student’s login details</strong><p>{studentInitialCredentials.full_name} · {studentInitialCredentials.admission_number}</p><p>Username: <code>{studentInitialCredentials.username}</code></p><p>Temporary password: <code>{studentInitialCredentials.temporary_password}</code></p><p className="empty-note">The student must change this password at first login. These details are shown only once.</p></div> : null}
                   {bulkEnrollNotice ? <p className="user-management-notice" role="status">{bulkEnrollNotice}</p> : null}
-                  {bulkImportNotice && bulkImportRole === 'STUDENT' ? <p className="user-management-notice" role="status">{bulkImportNotice}</p> : null}
+                  {bulkImportNotice && bulkImportRole === 'STUDENT' ? <><p className="user-management-notice" role="status">{bulkImportNotice}</p>{bulkActivationRecords.length ? <div className="import-preview"><strong>Save these temporary login details</strong><p className="empty-note">Give each student their username and temporary password. The system will require a password change at first login.</p><div className="table-scroll"><table><thead><tr><th>Admission number</th><th>Student</th><th>Username</th><th>Temporary password</th></tr></thead><tbody>{bulkActivationRecords.map((record) => <tr key={record.admission_number}><td>{record.admission_number}</td><td>{record.full_name}</td><td>{record.username}</td><td><code>{record.temporary_password}</code></td></tr>)}</tbody></table></div><button className="ghost-btn" type="button" onClick={() => { const rows = [['Admission number', 'Student', 'Username', 'Temporary password'], ...bulkActivationRecords.map((record) => [record.admission_number, record.full_name, record.username, record.temporary_password])]; const csv = rows.map((row) => row.map((value) => `"${value.replace(/"/g, '""')}"`).join(',')).join('\r\n'); const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'student-login-details.csv'; link.click(); URL.revokeObjectURL(url); }}>Download login details</button></div> : null}</> : null}
                   {showBulkImport && bulkImportRole === 'STUDENT' ? (
                     <form className="academic-year-form" onSubmit={handleBulkImport}>
-                      <div className="user-form-heading"><span className="eyebrow">CSV import</span><h3>Import student accounts</h3></div>
-                      <p className="empty-note" style={{ marginBottom: 10 }}>Required columns: <code>username, password, first_name, last_name, admission_number</code>. Optional: <code>email, gender, parent_name</code></p>
+                      <div className="user-form-heading"><span className="eyebrow">Student registration</span><h3>Upload student CSV</h3></div>
+                      <p className="empty-note" style={{ marginBottom: 10 }}>Required columns: <code>first_name, last_name</code>. Optional: <code>admission_number, middle_name, gender, date_of_birth, form, class_name, parent_name, parent_phone, email</code>. Dates may use <code>YYYY-MM-DD</code> or <code>DD/MM/YYYY</code>. Leave admission_number blank to generate an ID. Usernames are generated from the first and last name; each student receives a temporary password and must change it at first login. A supplied class_name must exist in the selected academic year.</p>
+                      <button className="ghost-btn" type="button" onClick={() => { const template = 'admission_number,first_name,middle_name,last_name,gender,date_of_birth,form,class_name,parent_name,parent_phone,email\r\n1245,Asha,John,Mwita,Female,2010-05-12,Form I,Form I A,Mary John,0712345678,asha@example.com'; const url = URL.createObjectURL(new Blob([template], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'student-registration-template.csv'; link.click(); URL.revokeObjectURL(url); }}>Download CSV template</button>
+                      <div className="academic-year-grid"><label className="form-field"><span>Academic year</span><select required value={bulkImportAcademicYearId} onChange={(event) => { const yearId = event.target.value; setBulkImportAcademicYearId(yearId); const nextTerm = managedTerms.find((term) => String(term.academic_year.id) === yearId && term.is_active) || managedTerms.find((term) => String(term.academic_year.id) === yearId); setBulkImportTermId(nextTerm ? String(nextTerm.id) : ''); setBulkImportPreview(null); }}><option value="">Select academic year</option>{managedAcademicYears.map((year) => <option key={year.id} value={year.id}>{year.name}{year.is_active ? ' (active)' : ''}</option>)}</select></label><label className="form-field"><span>Term</span><select required value={bulkImportTermId} onChange={(event) => { setBulkImportTermId(event.target.value); setBulkImportPreview(null); }}><option value="">Select term</option>{managedTerms.filter((term) => String(term.academic_year.id) === bulkImportAcademicYearId).map((term) => <option key={term.id} value={term.id}>{term.name}{term.is_active ? ' (active)' : ''}</option>)}</select></label></div>
                       {bulkImportError ? <p className="dashboard-error" role="alert">{bulkImportError}</p> : null}
-                      <label className="form-field"><span>Paste CSV data</span><textarea className="bulk-import-textarea" required rows={8} value={bulkImportCsv} onChange={(e) => setBulkImportCsv(e.target.value)} placeholder={`username,password,first_name,last_name,admission_number,gender\nstudent1,Pass1234!,Alice,Smith,ADM001,Female`} /></label>
-                      <div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isBulkImporting}>{isBulkImporting ? 'Importing...' : 'Import students'}</button><button className="ghost-btn" type="button" onClick={() => { setShowBulkImport(false); setBulkImportCsv(''); }}>Cancel</button></div>
+                      <label className="form-field"><span>Choose CSV file</span><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; file.text().then((text) => { setBulkImportCsv(text); setBulkImportPreview(null); setBulkImportError(''); }).catch(() => setBulkImportError('Unable to read the selected CSV file.')); }} /></label>
+                      <label className="form-field"><span>Or paste CSV data</span><textarea className="bulk-import-textarea" rows={8} value={bulkImportCsv} onChange={(e) => { setBulkImportCsv(e.target.value); setBulkImportPreview(null); }} placeholder={`admission_number,first_name,middle_name,last_name,gender,date_of_birth,form,class_name,parent_name,parent_phone,email\n1245,Asha,John,Mwita,Female,2010-05-12,Form I,Form I A,Mary John,0712345678,asha@example.com`} /></label>
+                      {bulkImportPreview ? <div className="import-preview" role="status"><strong>Import preview</strong><p>Total rows: {bulkImportPreview.rows} · Valid: {bulkImportPreview.valid} · Duplicates: {bulkImportPreview.duplicates.length} · Errors: {bulkImportPreview.errors.length}</p>{bulkImportPreview.duplicates.length ? <><strong>Duplicates</strong><ul>{bulkImportPreview.duplicates.slice(0, 10).map((error) => <li key={error}>{error}</li>)}</ul></> : null}{bulkImportPreview.errors.length ? <><strong>Errors</strong><ul>{bulkImportPreview.errors.slice(0, 10).map((error) => <li key={error}>{error}</li>)}</ul></> : null}</div> : null}
+                      <div className="user-form-actions">{!bulkImportPreview ? <button className="primary-btn" type="button" onClick={previewStudentImport} disabled={isBulkImporting}>{isBulkImporting ? 'Checking rows...' : 'Preview import'}</button> : <button className="primary-btn" type="submit" disabled={isBulkImporting || !bulkImportPreview.valid}>{isBulkImporting ? 'Importing...' : `Import ${bulkImportPreview.valid} valid students`}</button>}<button className="ghost-btn" type="button" onClick={() => { setShowBulkImport(false); setBulkImportCsv(''); setBulkImportPreview(null); }}>Cancel</button></div>
                     </form>
                   ) : null}
                   {showBulkEnrollForm ? (
@@ -2727,38 +2966,46 @@ function App() {
                   {showDataManagementForm ? <form className="academic-year-form" onSubmit={handleSaveDataManagementRecord}>
                     <div className="user-form-heading"><span className="eyebrow">{editingDataRecordId ? 'Update student' : 'New student'}</span><h3>{editingDataRecordId ? 'Edit student profile' : 'Create student account'}</h3></div>
                     <div className="academic-year-grid">
-                      {!editingDataRecordId ? <><label className="form-field"><span>Username</span><input required maxLength={150} autoComplete="username" value={dataManagementForm.username} onChange={(event) => setDataManagementForm({ ...dataManagementForm, username: event.target.value })} /></label><label className="form-field"><span>Initial password</span><input required type="password" minLength={8} autoComplete="new-password" value={dataManagementForm.password} onChange={(event) => setDataManagementForm({ ...dataManagementForm, password: event.target.value })} /></label></> : null}
                       <label className="form-field"><span>First name</span><input required maxLength={150} value={dataManagementForm.first_name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, first_name: event.target.value })} /></label><label className="form-field"><span>Last name</span><input required maxLength={150} value={dataManagementForm.last_name} onChange={(event) => setDataManagementForm({ ...dataManagementForm, last_name: event.target.value })} /></label>
                       <label className="form-field"><span>Email</span><input type="email" value={dataManagementForm.email} onChange={(event) => setDataManagementForm({ ...dataManagementForm, email: event.target.value })} /></label><label className="form-field"><span>Phone number</span><input maxLength={20} value={dataManagementForm.phone_number} onChange={(event) => setDataManagementForm({ ...dataManagementForm, phone_number: event.target.value })} /></label>
-                      <label className="form-field"><span>Admission number</span><input required maxLength={30} value={dataManagementForm.admission_number} onChange={(event) => setDataManagementForm({ ...dataManagementForm, admission_number: event.target.value })} /></label><label className="form-field"><span>Date of birth</span><input type="date" value={dataManagementForm.date_of_birth} onChange={(event) => setDataManagementForm({ ...dataManagementForm, date_of_birth: event.target.value })} /></label>
-                      <label className="form-field"><span>Gender</span><select value={dataManagementForm.gender} onChange={(event) => setDataManagementForm({ ...dataManagementForm, gender: event.target.value })}><option value="">Select gender</option><option value="Female">Female</option><option value="Male">Male</option><option value="Other">Other</option></select></label>
+                      <label className="form-field"><span>Admission number</span><input maxLength={20} value={dataManagementForm.admission_number} onChange={(event) => setDataManagementForm({ ...dataManagementForm, admission_number: event.target.value })} placeholder="Auto generated if blank" /></label><label className="form-field"><span>Date of birth</span><input type="date" value={dataManagementForm.date_of_birth} onChange={(event) => setDataManagementForm({ ...dataManagementForm, date_of_birth: event.target.value })} /></label>
+                      <label className="form-field"><span>Gender</span><select value={dataManagementForm.gender} onChange={(event) => setDataManagementForm({ ...dataManagementForm, gender: event.target.value })}><option value="">Select gender</option><option value="Female">Female</option><option value="Male">Male</option></select></label>
                       <label className="form-field"><span>Current class (display)</span><input maxLength={50} value={dataManagementForm.current_class} onChange={(event) => setDataManagementForm({ ...dataManagementForm, current_class: event.target.value })} /></label>
                     </div><div className="user-form-actions"><button className="primary-btn" type="submit" disabled={isSavingDataManagement}>{isSavingDataManagement ? 'Saving...' : editingDataRecordId ? 'Save changes' : 'Create student'}</button><button className="ghost-btn" type="button" onClick={() => { setShowDataManagementForm(false); setEditingDataRecordId(null); setDataManagementError(''); }}>Cancel</button></div>
                   </form> : null}
+                  {user.role === 'TEACHER' ? <p className="empty-note data-management-description">This directory shows students enrolled in classes you teach directly or through your assigned subjects. Open My Classes and select “View students” to filter by class.</p> : null}
                   <label className="form-field student-search"><span>Search students</span><input value={studentSearch} onChange={(event) => setStudentSearch(event.target.value)} placeholder="Name or admission number" /></label>
                   {isAdminWorkspace && (managedClasses.length === 0 || managedAcademicYears.length === 0 || managedTerms.length === 0) ? <p className="empty-note enrollment-prerequisite-note">Set up academic years, terms, and classes before enrolling students.</p> : null}
                   {isLoadingStudents ? <p className="empty-note">Loading students...</p> : null}
-                  <table><thead><tr><th>Admission no.</th><th>Name</th><th>Class</th>{user.role !== 'ACADEMIC_OFFICER' ? <th>Action</th> : null}{isAdminWorkspace ? <th>Manage</th> : null}</tr></thead>
-                    <tbody>{students.map((student) => <tr key={student.id}><td>{student.admission_number}</td><td>{student.full_name}</td><td>{studentClassFilter ? teacherClasses.find((schoolClass) => String(schoolClass.id) === studentClassFilter)?.name || managedClasses.find((schoolClass) => String(schoolClass.id) === studentClassFilter)?.name || student.current_class || '—' : student.current_class || '—'}</td>{user.role !== 'ACADEMIC_OFFICER' ? <td><button className="text-btn" type="button" onClick={() => setSelectedStudent(student)}>Open profile</button></td> : null}{isAdminWorkspace ? <td><div className="student-row-actions"><button className="text-btn" type="button" onClick={() => startDataManagementEdit(student)}>Edit</button><button className="text-btn" type="button" onClick={() => startStudentEnrollment(student)}>Enroll</button></div></td> : null}</tr>)}
-                      {!students.length && !isLoadingStudents ? <tr><td colSpan={(isAdminWorkspace ? 4 : 3) + (user.role !== 'ACADEMIC_OFFICER' ? 1 : 0)} className="empty-table">{studentClassFilter ? 'No students are enrolled in this class yet. An administrator can enroll students from this page.' : user.role === 'TEACHER' ? 'No enrolled students are assigned to your classes yet.' : 'No students match this search.'}</td></tr> : null}
+                  <table><thead><tr><th>Admission no.</th><th>Name</th><th>Class</th>{isAdminWorkspace ? <th>Account</th> : null}{user.role !== 'ACADEMIC_OFFICER' ? <th>Action</th> : null}{isAdminWorkspace ? <th>Manage</th> : null}</tr></thead>
+                    <tbody>{students.map((student) => <tr key={student.id}><td>{student.admission_number}</td><td>{student.full_name}</td><td>{studentClassFilter ? teacherClasses.find((schoolClass) => String(schoolClass.id) === studentClassFilter)?.name || managedClasses.find((schoolClass) => String(schoolClass.id) === studentClassFilter)?.name || student.current_class || '—' : student.current_class || '—'}</td>{isAdminWorkspace ? <td>{student.account_status === 'ACTIVE' ? 'Active' : student.account_status === 'PASSWORD_CHANGE_REQUIRED' ? 'Change password at first login' : student.account_status === 'PENDING_ACTIVATION' ? 'Pending activation' : 'Inactive'}</td> : null}{user.role !== 'ACADEMIC_OFFICER' ? <td><button className="text-btn" type="button" onClick={() => setSelectedStudent(student)}>Open profile</button></td> : null}{isAdminWorkspace ? <td><div className="student-row-actions"><button className="text-btn" type="button" onClick={() => startDataManagementEdit(student)}>Edit</button><button className="text-btn" type="button" onClick={() => startStudentEnrollment(student)}>Enroll</button><button className="text-btn" type="button" onClick={() => handleResetStudentLogin(student)}>Reset login</button></div></td> : null}</tr>)}
+                      {!students.length && !isLoadingStudents ? <tr><td colSpan={(isAdminWorkspace ? 5 : 3) + (user.role !== 'ACADEMIC_OFFICER' ? 1 : 0)} className="empty-table">{studentClassFilter ? 'No students are enrolled in this class yet. An administrator can enroll students from this page.' : user.role === 'TEACHER' ? 'No enrolled students are assigned to your classes yet.' : 'No students match this search.'}</td></tr> : null}
                     </tbody>
                   </table>
                 </>
               ) : (
                 <div className="student-profile" id={user.role !== 'STUDENT' || studentWorkspaceView === 'Result Slip' ? 'student-result-slip' : undefined}>
                   {user.role === 'STUDENT' && studentWorkspaceView === 'My Profile' ? (
-                    <section className="student-workspace-card"><span className="eyebrow">Personal details</span><h2>{selectedStudent.full_name}</h2><div className="profile-facts"><p><strong>Admission number</strong><span>{selectedStudent.admission_number}</span></p><p><strong>Class</strong><span>{selectedStudent.current_class || '—'}</span></p><p><strong>Date of birth</strong><span>{selectedStudent.date_of_birth || '—'}</span></p><p><strong>Gender</strong><span>{selectedStudent.gender || '—'}</span></p><p><strong>Parent / guardian</strong><span>{selectedStudent.parent_name || '—'}</span></p><p><strong>Email</strong><span>{selectedStudent.user?.email || '—'}</span></p></div></section>
+                    <section className="student-workspace-card"><span className="eyebrow">Personal details</span><h2>{selectedStudent.full_name}</h2><div className="profile-facts"><p><strong>Admission number</strong><span>{selectedStudent.admission_number}</span></p><p><strong>Class</strong><span>{selectedStudent.current_class || '—'}</span></p><p><strong>Date of birth</strong><span>{selectedStudent.date_of_birth || '—'}</span></p><p><strong>Gender</strong><span>{selectedStudent.gender || '—'}</span></p><p><strong>Parent / guardian</strong><span>{selectedStudent.parent_name || '—'}</span></p><p><strong>Parent phone</strong><span>{selectedStudent.parent_phone || '—'}</span></p><p><strong>Email</strong><span>{selectedStudent.user?.email || '—'}</span></p></div></section>
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Subjects' ? (
                     <section className="student-workspace-card">
-                      <div className="panel-header"><div><span className="eyebrow">School assigned subjects</span><h3>My subjects</h3></div></div>
-                      <p className="empty-note">The school assigns subjects through your class for each academic year. Contact the school if this list is incorrect.</p>
-                      <label className="form-field performance-filters"><span>Academic year</span><select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All enrolled years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+                      <div className="panel-header"><div><span className="eyebrow">Subject registration</span><h3>My subjects</h3></div></div>
+                      <p className="empty-note">Compulsory subjects are added automatically. Choose optional subjects for your enrolled class and term, then save your selection.</p>
+                      <div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All enrolled years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Term<select value={studentResultTermFilter} disabled={!studentResultYearFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label></div>
                       {studentSubjectsError ? <p className="dashboard-error" role="alert">{studentSubjectsError}</p> : null}
-                      {isLoadingStudentSubjects ? <p className="empty-note" role="status">Loading your assigned subjects...</p> : null}
-                      <div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Code</th><th>Class</th><th>Academic year</th><th>Teacher</th></tr></thead><tbody>
-                        {studentAssignedSubjects.filter((subject) => !studentResultYearFilter || String(subject.school_class.academic_year.id) === studentResultYearFilter).map((subject) => <tr key={subject.id}><td>{subject.name}</td><td>{subject.code}</td><td>{subject.school_class.name}</td><td>{subject.school_class.academic_year.name}</td><td>{subject.teacher || 'Not assigned'}</td></tr>)}
-                        {!studentAssignedSubjects.filter((subject) => !studentResultYearFilter || String(subject.school_class.academic_year.id) === studentResultYearFilter).length && !isLoadingStudentSubjects ? <tr><td colSpan={5} className="empty-table">No subjects are assigned for this academic year.</td></tr> : null}
-                      </tbody></table></div>
+                      {isLoadingStudentSubjects ? <p className="empty-note" role="status">Loading your subjects...</p> : null}
+                      {subjectRegistrationGroups.map((group) => {
+                        const key = `${group.school_class.id}:${group.term.id}`;
+                        const selected = subjectRegistrationSelections[key] || [];
+                        const compulsory = group.subjects.filter((subject) => !subject.is_optional);
+                        const optional = group.subjects.filter((subject) => subject.is_optional);
+                        return <section className="student-workspace-card" key={key}><div className="panel-header"><div><span className="eyebrow">{group.academic_year.name} · {formatTermName(group.term.name)}</span><h3>{group.school_class.name}</h3></div></div>
+                          <p className="empty-note">Compulsory: {compulsory.map((subject) => subject.name).join(', ') || 'None'} · Optional selected: {selected.length} / {group.max_optional_subjects}</p>
+                          {optional.map((subject) => <label className="academic-year-active" key={subject.id}><input type="checkbox" checked={selected.includes(subject.id)} disabled={!selected.includes(subject.id) && selected.length >= group.max_optional_subjects} onChange={(event) => setSubjectRegistrationSelections((previous) => ({ ...previous, [key]: event.target.checked ? [...selected, subject.id] : selected.filter((id) => id !== subject.id) }))} /><span>{subject.name} ({subject.code}){subject.teacher ? ` · ${subject.teacher}` : ''}</span></label>)}
+                          {!optional.length ? <p className="empty-note">No optional subjects are available for this class.</p> : <div className="user-form-actions"><button className="primary-btn" type="button" disabled={savingSubjectRegistration === key || selected.length > group.max_optional_subjects} onClick={() => saveSubjectRegistration(group)}>{savingSubjectRegistration === key ? 'Saving...' : 'Save subject selection'}</button></div>}
+                        </section>;
+                      })}
+                      {!subjectRegistrationGroups.length && !isLoadingStudentSubjects ? <p className="empty-note">No enrollment was found for the selected academic year and term.</p> : null}
                     </section>
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Results' ? (
                     <section className="student-workspace-card">
@@ -2772,7 +3019,7 @@ function App() {
                   ) : user.role === 'STUDENT' && studentWorkspaceView === 'My Performance' ? (
                     <section className="student-workspace-card"><div className="panel-header"><div><span className="eyebrow">Published assessment results</span><h3>My performance</h3></div></div>
                       <div className="result-slip-actions performance-filters"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">All years</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Semester / term<select value={studentResultTermFilter} disabled={!studentResultYearFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)}><option value="">All terms in year</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label></div>
-                      <section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong>{studentOverallAverage === null ? '—' : `${studentOverallAverage.toFixed(1)}%`}</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td>{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
+                      <section className="stats-grid student-performance-stats"><article className="stat-card primary"><div><span>Overall average</span><strong className="student-performance-percentage">{studentOverallAverage === null ? '—' : `${studentOverallAverage.toFixed(1)}%`}</strong></div></article><article className="stat-card success"><div><span>Subjects with results</span><strong>{studentSubjectPerformance.length}</strong></div></article><article className="stat-card info"><div><span>Published marks</span><strong>{publishedStudentResults.length}</strong></div></article></section><div className="table-scroll"><table className="data-management-table"><thead><tr><th>Subject</th><th>Assessments</th><th>Average marks</th></tr></thead><tbody>{studentSubjectPerformance.map((subject) => <tr key={subject.name}><td>{subject.name}</td><td>{subject.count}</td><td className="student-performance-percentage">{subject.average.toFixed(1)}%</td></tr>)}{!studentSubjectPerformance.length ? <tr><td colSpan={3} className="empty-table">Published results will appear here when available.</td></tr> : null}</tbody></table></div></section>
                   ) : (
                     <div className="student-result-slip-content">
                       <div className="panel-header result-slip-header report-controls"><div><span className="eyebrow">Published results</span><h3>Student academic report</h3></div><div className="result-slip-actions"><label>Academic year<select value={studentResultYearFilter} onChange={(event) => { setStudentResultYearFilter(event.target.value); setStudentResultTermFilter(''); }}><option value="">Select year</option>{studentResultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label><label>Semester / term<select value={studentResultTermFilter} onChange={(event) => setStudentResultTermFilter(event.target.value)} disabled={!studentResultYearFilter}><option value="">Select term</option>{studentResultTerms.map((term) => <option key={term.id} value={term.id}>{formatTermName(term.name)}</option>)}</select></label>
