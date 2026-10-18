@@ -819,6 +819,16 @@ def results(request):
             if not term_id.isdecimal():
                 return Response({'detail': 'Term ID must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
             results = results.filter(term_id=int(term_id))
+        class_id = request.query_params.get('class_id')
+        if class_id:
+            if not class_id.isdecimal():
+                return Response({'detail': 'Class ID must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
+            results = results.filter(subject__school_class_id=int(class_id))
+        subject_id = request.query_params.get('subject_id')
+        if subject_id:
+            if not subject_id.isdecimal():
+                return Response({'detail': 'Subject ID must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
+            results = results.filter(subject_id=int(subject_id))
         return Response(ResultSerializer(results, many=True, context={'request': request}).data)
 
     # POST: only Teachers (and Admin/SuperAdmin as emergency override) may enter marks
@@ -1550,8 +1560,15 @@ def performance_summary(request):
         )
     elif request.user.role == User.Role.STUDENT:
         result_rows = result_rows.filter(student__user=request.user, status=Result.ResultStatus.PUBLISHED)
+    class_id = request.query_params.get('class_id', '').strip()
+    selected_class_id = None
+    if class_id:
+        if not class_id.isdecimal() or not SchoolClass.objects.filter(pk=int(class_id)).exists():
+            return Response({'detail': 'Select a valid class.'}, status=status.HTTP_400_BAD_REQUEST)
+        selected_class_id = int(class_id)
+        result_rows = result_rows.filter(subject__school_class_id=selected_class_id)
     rows = list(result_rows.values(
-        'student_id', 'subject_id', 'subject__code', 'subject__name',
+        'student_id', 'subject_id', 'subject__code', 'subject__name', 'subject__school_class_id', 'subject__school_class__name', 'subject__school_class__section',
         'academic_year_id', 'term_id', 'assessment_type', 'marks',
     ))
     policy_map = {}
@@ -1567,25 +1584,68 @@ def performance_summary(request):
     for row in rows:
         key = (row['student_id'], row['subject_id'], row['academic_year_id'], row['term_id'])
         grouped_results.setdefault(key, {}).setdefault(row['assessment_type'], []).append(float(row['marks']))
-        subject_names[row['subject_id']] = (row['subject__code'], row['subject__name'])
+        subject_names[row['subject_id']] = (
+            row['subject__code'], row['subject__name'], row['subject__school_class_id'],
+            row['subject__school_class__name'], row['subject__school_class__section'],
+        )
     subject_marks = {}
     subject_students = {}
+    student_averages = {}
     for (student_id, subject_id, year_id, term_id), assessments in grouped_results.items():
         mark, _ = assessment_average(assessments, policy_map.get((subject_id, year_id, term_id), {}))
         subject_marks.setdefault(subject_id, []).append(mark)
         subject_students.setdefault(subject_id, set()).add(student_id)
+        if mark is not None:
+            student_averages.setdefault(student_id, []).append(mark)
     payload = []
     for subject_id, marks in subject_marks.items():
-        code, name = subject_names[subject_id]
+        code, name, result_class_id, class_name, class_section = subject_names[subject_id]
         payload.append({
             'code': code,
             'name': name,
+            'school_class_id': result_class_id,
+            'class_name': f'{class_name} {class_section}'.strip(),
             'average_marks': round(sum(marks) / len(marks), 2),
             'total_students': len(subject_students[subject_id]),
         })
     payload.sort(key=lambda item: item['average_marks'], reverse=True)
-    payload = payload[:8]
-    return Response({'subjects': payload})
+    if not class_id:
+        payload = payload[:8]
+    ranked_students = sorted(
+        ((student_id, sum(marks) / len(marks)) for student_id, marks in student_averages.items() if marks),
+        key=lambda row: row[1], reverse=True,
+    )[:5]
+    ranked_student_records = {
+        student.pk: student for student in Student.objects.filter(
+            pk__in=[student_id for student_id, _average in ranked_students],
+        ).select_related('user')
+    }
+    response_data = {
+        'subjects': payload,
+        'top_students': [
+            {
+                'name': ranked_student_records[student_id].user.get_full_name() or ranked_student_records[student_id].user.username,
+                'average': round(float(average), 2),
+                'admission_number': ranked_student_records[student_id].admission_number,
+            }
+            for student_id, average in ranked_students if student_id in ranked_student_records
+        ],
+    }
+    if selected_class_id is not None:
+        pending_rows = Result.objects.filter(
+            subject__school_class_id=selected_class_id,
+            status__in=[Result.ResultStatus.DRAFT, Result.ResultStatus.SUBMITTED, Result.ResultStatus.UNDER_REVIEW],
+        )
+        if request.user.role == User.Role.TEACHER:
+            pending_rows = pending_rows.filter(
+                Q(subject__teacher__user=request.user) | Q(subject__school_class__teacher__user=request.user),
+            )
+        response_data['stats'] = {
+            'students': Enrollment.objects.filter(school_class_id=selected_class_id).values('student_id').distinct().count(),
+            'approved_results': result_rows.count(),
+            'pending_results': pending_rows.count(),
+        }
+    return Response(response_data)
 
 
 @api_view(['GET'])

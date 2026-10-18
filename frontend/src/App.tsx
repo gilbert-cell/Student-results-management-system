@@ -24,7 +24,8 @@ type ManagedUser = {
 };
 
 type AuditLogRecord = { id: number; actor_name: string; action: string; model_name: string; description: string; created_at: string };
-type PerformanceSubject = { code: string; name: string; average_marks: number; total_students: number };
+type PerformanceSubject = { code: string; name: string; average_marks: number; total_students: number; school_class_id: number; class_name: string };
+type ReportTopStudent = { name: string; average: number; admission_number: string };
 type EnrollmentForm = { student_id: string; school_class_id: string; academic_year_id: string; term_id: string };
 const emptyEnrollmentForm: EnrollmentForm = { student_id: '', school_class_id: '', academic_year_id: '', term_id: '' };
 
@@ -134,7 +135,7 @@ type ManagedTerm = { id: number; name: string; academic_year: { id: number; name
 type TermForm = { academic_year_id: string; name: string; start_date: string; end_date: string; is_active: boolean };
 type AssessmentWeightRecord = { id: number; subject_id: number; academic_year_id: number; term_id: number; assessment_type: string; weight: string | number };
 const emptyTermForm: TermForm = { academic_year_id: '', name: '', start_date: '', end_date: '', is_active: false };
-type SubjectOption = { id: number; code: string; name: string; school_class: { id: number; name: string; academic_year: { id: number; name?: string } } };
+type SubjectOption = { id: number; code: string; name: string; school_class: { id: number; name: string; section?: string; academic_year: { id: number; name?: string } } };
 type EnrollmentOption = { student: { id: number; full_name: string; admission_number: string }; school_class: { id: number }; academic_year: { id: number }; term: { id: number } };
 type ResultForm = { student_id: string; subject_id: string; academic_year_id: string; term_id: string; assessment_type: string; marks: string; remarks: string };
 type DashboardNotification = { title: string; message: string; count: number; section: string; status_filter: string };
@@ -406,6 +407,10 @@ function App() {
   const [auditModelFilter, setAuditModelFilter] = useState('');
   const [auditLimit, setAuditLimit] = useState('100');
   const [reportSubjects, setReportSubjects] = useState<PerformanceSubject[]>([]);
+  const [reportClasses, setReportClasses] = useState<SchoolClassRecord[]>([]);
+  const [reportClassFilter, setReportClassFilter] = useState('');
+  const [reportTopStudents, setReportTopStudents] = useState<ReportTopStudent[]>([]);
+  const [reportClassStats, setReportClassStats] = useState<{ students: number; approved_results: number; pending_results: number } | null>(null);
   const [reportError, setReportError] = useState('');
   const [isLoadingReport, setIsLoadingReport] = useState(false);
   const [isSavingUser, setIsSavingUser] = useState(false);
@@ -414,6 +419,10 @@ function App() {
   const [userForm, setUserForm] = useState<UserForm>(emptyUserForm);
   const [resultRows, setResultRows] = useState<ResultRecord[]>([]);
   const [resultStatusFilter, setResultStatusFilter] = useState('');
+  const [resultAcademicYearFilter, setResultAcademicYearFilter] = useState('');
+  const [resultTermFilter, setResultTermFilter] = useState('');
+  const [resultClassFilter, setResultClassFilter] = useState('');
+  const [resultSubjectFilter, setResultSubjectFilter] = useState('');
   const [resultError, setResultError] = useState('');
   const [resultNotice, setResultNotice] = useState('');
   const [resultOptionsError, setResultOptionsError] = useState('');
@@ -824,8 +833,14 @@ function App() {
     const controller = new AbortController();
     setIsLoadingReport(true);
     setReportError('');
-    readApi<{ subjects: PerformanceSubject[] }>('/reports/performance/', controller.signal)
-      .then((payload) => setReportSubjects(payload.subjects))
+    setReportClassStats(null);
+    const query = reportClassFilter ? `?class_id=${encodeURIComponent(reportClassFilter)}` : '';
+    readApi<{ subjects: PerformanceSubject[]; top_students: ReportTopStudent[]; stats?: { students: number; approved_results: number; pending_results: number } }>(`/reports/performance/${query}`, controller.signal)
+      .then((payload) => {
+        setReportSubjects(payload.subjects);
+        setReportTopStudents(payload.top_students || []);
+        setReportClassStats(payload.stats || null);
+      })
       .catch((error: Error) => {
         if (error.name !== 'AbortError') setReportError(getSafeErrorMessage(error));
       })
@@ -964,9 +979,48 @@ function App() {
   }, [user, selectedStudent, studentResultYearFilter, studentResultTermFilter]);
 
   useEffect(() => {
+    if (!user || activeSection !== 'Results' || user.role === 'TEACHER') return;
+    const controller = new AbortController();
+    Promise.all([
+      readApi<AcademicYearOption[]>('/academic-years/', controller.signal),
+      readApi<TermOption[]>('/terms/', controller.signal),
+      readApi<SubjectOption[]>('/subjects/', controller.signal),
+    ]).then(([years, terms, subjects]) => {
+      setResultYears(years);
+      setResultTerms(terms);
+      setResultSubjects(subjects);
+    }).catch((error: Error) => {
+      if (error.name !== 'AbortError') setResultOptionsError(getSafeErrorMessage(error));
+    });
+    return () => controller.abort();
+  }, [user, activeSection, reportClassFilter]);
+
+  useEffect(() => {
+    if (!user || activeSection !== 'Reports') return;
+    const controller = new AbortController();
+    readApi<SchoolClassRecord[]>('/classes/', controller.signal)
+      .then((classes) => setReportClasses(classes))
+      .catch((error: Error) => {
+        if (error.name !== 'AbortError') setReportError(getSafeErrorMessage(error));
+      });
+    return () => controller.abort();
+  }, [user, activeSection]);
+
+  function buildResultFilterQuery() {
+    const params = new URLSearchParams();
+    if (resultStatusFilter) params.set('status', resultStatusFilter);
+    if (resultAcademicYearFilter) params.set('academic_year_id', resultAcademicYearFilter);
+    if (resultTermFilter) params.set('term_id', resultTermFilter);
+    if (resultClassFilter) params.set('class_id', resultClassFilter);
+    if (resultSubjectFilter) params.set('subject_id', resultSubjectFilter);
+    const query = params.toString();
+    return query ? `?${query}` : '';
+  }
+
+  useEffect(() => {
     if (!user || activeSection !== 'Results') return;
     const controller = new AbortController();
-    const query = resultStatusFilter ? `?status=${encodeURIComponent(resultStatusFilter)}` : '';
+    const query = buildResultFilterQuery();
     setIsLoadingResults(true);
     setResultError('');
     readApi<ResultRecord[]>(`/results/${query}`, controller.signal)
@@ -978,7 +1032,11 @@ function App() {
         if (!controller.signal.aborted) setIsLoadingResults(false);
       });
     return () => controller.abort();
-  }, [user, activeSection, resultStatusFilter]);
+  }, [user, activeSection, resultStatusFilter, resultAcademicYearFilter, resultTermFilter, resultClassFilter, resultSubjectFilter]);
+
+  useEffect(() => {
+    setBulkApprovalIds(new Set());
+  }, [resultStatusFilter, resultAcademicYearFilter, resultTermFilter, resultClassFilter, resultSubjectFilter]);
 
   useEffect(() => {
     if (!user || user.role !== 'TEACHER' || activeSection !== 'Results') return;
@@ -1100,6 +1158,15 @@ function App() {
   const studentResultYears = resultYears;
   const studentResultTerms = resultTerms.filter((term) =>
     !studentResultYearFilter || String(term.academic_year.id) === studentResultYearFilter,
+  );
+  const resultFilterClasses = Array.from(new Map(
+    resultSubjects
+      .filter((subject) => !resultAcademicYearFilter || String(subject.school_class.academic_year.id) === resultAcademicYearFilter)
+      .map((subject) => [subject.school_class.id, subject.school_class] as const),
+  ).values());
+  const resultFilterSubjects = resultSubjects.filter((subject) =>
+    (!resultAcademicYearFilter || String(subject.school_class.academic_year.id) === resultAcademicYearFilter)
+    && (!resultClassFilter || String(subject.school_class.id) === resultClassFilter),
   );
   const filteredManagedClasses = managedClasses.filter((schoolClass) =>
     !classAcademicYearFilter || String(schoolClass.academic_year.id) === classAcademicYearFilter,
@@ -1397,7 +1464,7 @@ function App() {
   }
 
   async function refreshResultRows() {
-    const query = resultStatusFilter ? `?status=${encodeURIComponent(resultStatusFilter)}` : '';
+    const query = buildResultFilterQuery();
     const response = await fetch(`${apiRoot}/results/${query}`, { credentials: 'include', headers: { Accept: 'application/json' } });
     setResultRows(await readResponse<ResultRecord[]>(response));
   }
@@ -2206,8 +2273,8 @@ function App() {
   function exportPerformanceReport() {
     const csvValue = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
     const rows = [
-      ['Subject code', 'Subject', 'Average marks (%)', 'Students with results'],
-      ...reportSubjects.map((subject) => [subject.code, subject.name, subject.average_marks, subject.total_students]),
+      ['Subject code', 'Subject', 'Class', 'Average marks (%)', 'Students with results'],
+      ...reportSubjects.map((subject) => [subject.code, subject.name, subject.class_name, subject.average_marks, subject.total_students]),
     ];
     const csv = rows.map((row) => row.map(csvValue).join(',')).join('\r\n');
     const file = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
@@ -2730,6 +2797,12 @@ function App() {
               </select></label>
             </div>
             <p className="empty-note result-workflow-help">Teachers save marks as drafts and submit them for review. An administrator or academic officer reviews, approves, and publishes results. Students only see published results.</p>
+            <div className="result-entry-grid" style={{ marginBottom: 14 }}>
+              <label className="form-field"><span>Academic year</span><select value={resultAcademicYearFilter} onChange={(event) => { setResultAcademicYearFilter(event.target.value); setResultTermFilter(''); setResultClassFilter(''); setResultSubjectFilter(''); }}><option value="">All years</option>{resultYears.map((year) => <option key={year.id} value={year.id}>{year.name}</option>)}</select></label>
+              <label className="form-field"><span>Term</span><select disabled={!resultAcademicYearFilter} value={resultTermFilter} onChange={(event) => setResultTermFilter(event.target.value)}><option value="">All terms</option>{resultTerms.filter((term) => String(term.academic_year.id) === resultAcademicYearFilter).map((term) => <option key={term.id} value={term.id}>{term.name}</option>)}</select></label>
+              <label className="form-field"><span>Class</span><select value={resultClassFilter} onChange={(event) => { setResultClassFilter(event.target.value); setResultSubjectFilter(''); }}><option value="">All classes</option>{resultFilterClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''}</option>)}</select></label>
+              <label className="form-field"><span>Subject</span><select value={resultSubjectFilter} onChange={(event) => setResultSubjectFilter(event.target.value)}><option value="">All subjects</option>{resultFilterSubjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.code} · {subject.name}</option>)}</select></label>
+            </div>
             {resultError ? <p className="dashboard-error" role="alert">{resultError}</p> : null}
             {resultNotice ? <p className="user-management-notice" role="status">{resultNotice}</p> : null}
             {['SUPER_ADMIN', 'ADMIN', 'ACADEMIC_OFFICER'].includes(user.role) ? (
@@ -2867,7 +2940,7 @@ function App() {
                     </div></td>
                     <td className="result-history-cell">{result.approvals?.length ? <details><summary>Review history ({result.approvals.length})</summary><ul>{result.approvals.map((approval) => <li key={approval.id}><strong>{approval.decision.replace('_', ' ')}</strong> by {approval.approved_by_name}{approval.comments ? <p>{approval.comments}</p> : null}<small>{new Date(approval.created_at).toLocaleString()}</small></li>)}</ul></details> : <small>No review activity</small>}</td>
                   </tr>;
-                })}{!resultRows.length && !isLoadingResults ? <tr><td colSpan={8} className="empty-table">No results match this status.</td></tr> : null}</tbody>
+                })}{!resultRows.length && !isLoadingResults ? <tr><td colSpan={8} className="empty-table">No results match the selected filters.</td></tr> : null}</tbody>
               </table>
             </div>
             {isLoadingResults ? <p className="empty-note">Loading results...</p> : null}
@@ -2974,24 +3047,24 @@ function App() {
             {dashboardError ? <p className="dashboard-error" role="alert">{dashboardError}</p> : null}
             {isLoadingDashboard ? <p className="empty-note" role="status">Loading workspace totals...</p> : null}
             <section className="stats-grid report-stats-grid">
-              <article className="stat-card primary"><div><span>Students in your workspace</span><strong>{dashboard.stats.students}</strong></div></article>
-              <article className="stat-card success"><div><span>Approved or published results</span><strong>{dashboard.stats.approved_results}</strong></div></article>
-              <article className="stat-card warning"><div><span>Results awaiting action</span><strong>{dashboard.stats.pending_results}</strong></div></article>
+              <article className="stat-card primary"><div><span>{reportClassFilter ? 'Students in selected class' : 'Students in your workspace'}</span><strong>{reportClassFilter ? reportClassStats?.students ?? '—' : dashboard.stats.students}</strong></div></article>
+              <article className="stat-card success"><div><span>{reportClassFilter ? 'Approved / published results in class' : 'Approved or published results'}</span><strong>{reportClassFilter ? reportClassStats?.approved_results ?? '—' : dashboard.stats.approved_results}</strong></div></article>
+              <article className="stat-card warning"><div><span>{reportClassFilter ? 'Results awaiting action in class' : 'Results awaiting action'}</span><strong>{reportClassFilter ? reportClassStats?.pending_results ?? '—' : dashboard.stats.pending_results}</strong></div></article>
             </section>
             <section className="panel report-panel">
-              <div className="panel-header report-panel-header"><div><span className="eyebrow">Approved performance</span><h3>Subject performance</h3></div><div className="report-actions"><button className="ghost-btn" type="button" onClick={exportPerformanceReport} disabled={!reportSubjects.length}>Export CSV</button><button className="ghost-btn" type="button" onClick={() => window.print()}>Print report</button></div></div>
-              <p className="empty-note report-description">Average marks and student counts use approved and published results. Teacher reports include assigned subjects and classes.</p>
+              <div className="panel-header report-panel-header"><div><span className="eyebrow">Approved performance</span><h3>Subject performance</h3></div><div className="report-actions"><label className="form-field"><span>Class</span><select value={reportClassFilter} onChange={(event) => setReportClassFilter(event.target.value)}><option value="">All classes</option>{reportClasses.map((schoolClass) => <option key={schoolClass.id} value={schoolClass.id}>{schoolClass.name}{schoolClass.section ? ` ${schoolClass.section}` : ''} · {schoolClass.academic_year.name}</option>)}</select></label><button className="ghost-btn" type="button" onClick={exportPerformanceReport} disabled={!reportSubjects.length}>Export CSV</button><button className="ghost-btn" type="button" onClick={() => window.print()}>Print report</button></div></div>
+              <p className="empty-note report-description">Average marks and student counts use approved and published results. Select a class to filter the subject performance, class totals, and top student averages.</p>
               {isLoadingReport ? <p className="empty-note" role="status">Loading performance report...</p> : null}
-              <div className="table-scroll"><table className="report-subject-table"><thead><tr><th>Subject</th><th>Average marks</th><th>Students</th><th>Performance</th></tr></thead><tbody>
-                {reportSubjects.map((subject) => <tr key={subject.code}><td><strong>{subject.name}</strong><small className="report-subject-code">{subject.code}</small></td><td>{subject.average_marks.toFixed(1)}%</td><td>{subject.total_students}</td><td><div className="report-meter" role="img" aria-label={`${subject.average_marks.toFixed(1)} percent average`}><span style={{ width: `${Math.max(0, Math.min(100, subject.average_marks))}%` }} /></div></td></tr>)}
-                {!reportSubjects.length && !isLoadingReport && !reportError ? <tr><td colSpan={4} className="empty-table">No approved or published subject results are available yet.</td></tr> : null}
+              <div className="table-scroll"><table className="report-subject-table"><thead><tr><th>Subject</th><th>Class</th><th>Average marks</th><th>Students</th><th>Performance</th></tr></thead><tbody>
+                {reportSubjects.map((subject) => <tr key={subject.code}><td><strong>{subject.name}</strong><small className="report-subject-code">{subject.code}</small></td><td>{subject.class_name}</td><td>{subject.average_marks.toFixed(1)}%</td><td>{subject.total_students}</td><td><div className="report-meter" role="img" aria-label={`${subject.average_marks.toFixed(1)} percent average`}><span style={{ width: `${Math.max(0, Math.min(100, subject.average_marks))}%` }} /></div></td></tr>)}
+                {!reportSubjects.length && !isLoadingReport && !reportError ? <tr><td colSpan={5} className="empty-table">No approved or published subject results are available for this class.</td></tr> : null}
               </tbody></table></div>
             </section>
             <section className="panel table-panel report-leaders-panel">
               <div className="panel-header"><div><span className="eyebrow">Approved and published results</span><h3>Top student averages</h3></div></div>
               <div className="table-scroll"><table><thead><tr><th>Rank</th><th>Student</th><th>Admission number</th><th>Average</th></tr></thead><tbody>
-                {dashboard.top_students.map((student, index) => <tr key={student.admission_number}><td>{index + 1}</td><td>{student.name}</td><td>{student.admission_number}</td><td><span className="grade-badge">{student.average.toFixed(1)}%</span></td></tr>)}
-                {!dashboard.top_students.length ? <tr><td colSpan={4} className="empty-table">No student performance data is available yet.</td></tr> : null}
+                {(reportClassFilter ? reportTopStudents : dashboard.top_students).map((student, index) => <tr key={student.admission_number}><td>{index + 1}</td><td>{student.name}</td><td>{student.admission_number}</td><td><span className="grade-badge">{student.average.toFixed(1)}%</span></td></tr>)}
+                {!(reportClassFilter ? reportTopStudents : dashboard.top_students).length ? <tr><td colSpan={4} className="empty-table">No student performance data is available for this class.</td></tr> : null}
               </tbody></table></div>
             </section>
           </div>
